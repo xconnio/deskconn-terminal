@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      # Windows runners don't ship GNU make.
+      - if: runner.os == 'Windows'
+        run: choco install make -y --no-progress
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The hosted hub, as make setup does locally.
+      - name: Configure
+        run: cp .env.example .env.local
+
+      # Installers are named after package.json's version (deskconn-terminal-<version>-...).
+      - name: Type check and build
+        run: make build
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false' # ponytail: unsigned; add CSC_LINK/APPLE_ID secrets to sign
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deskconn-terminal-${{ matrix.os }}
+          retention-days: 90
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.dmg
+            release/*.exe
+
+  # Releases package.json's version once it lands on main without a tag yet, i.e.
+  # after merging a "Prepare release" pull request (or any other version bump).
+  release:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check for an unreleased version
+        id: version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already released"
+          else
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.version.outputs.version
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deskconn-terminal-*
+          path: release
+          merge-multiple: true
+
+      - name: Publish release
+        if: steps.version.outputs.version
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sha256sum * > SHA256SUMS
+          gh release create "v$VERSION" * --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "DeskConn Terminal v$VERSION" --generate-notes
