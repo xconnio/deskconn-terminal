@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, Hitbox, HitboxBehavior,
-    MouseButton, MouseDownEvent, Pixels, Point, ResizeEdge, SharedString, Size, Window, WindowControlArea, actions,
-    anchored, canvas, deferred, div, prelude::*, px,
+    AnyElement, App, BoxShadow, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, Hitbox,
+    HitboxBehavior, MouseButton, MouseDownEvent, Pixels, Point, ResizeEdge, SharedString, Size, Tiling, Window,
+    WindowControlArea, actions, anchored, canvas, deferred, div, hsla, point, prelude::*, px,
 };
 
 use crate::daemon::{self, Machine};
@@ -16,9 +16,12 @@ use crate::theme;
 actions!(workspace, [NewTab, CloseTab, NextTab, PreviousTab]);
 
 const TITLEBAR_HEIGHT: Pixels = px(38.);
-/// How far from a client-decorated window's edge it can be resized.
-const RESIZE_BORDER: Pixels = px(6.);
-/// How long quitting waits for the sessions to end.
+/// The room around a window that draws its own decorations, for its shadow and its resize
+/// handles.
+const SHADOW: Pixels = px(10.);
+/// The rounding of such a window's corners.
+const ROUNDING: Pixels = px(10.);
+/// How long closing the window waits for the sessions to end.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct Workspace {
@@ -31,6 +34,8 @@ pub struct Workspace {
     /// Why the machines couldn't be listed.
     error: Option<String>,
     focus: FocusHandle,
+    /// Whether the mouse was pressed on the titlebar, to move the window if it's dragged.
+    dragging: bool,
 }
 
 impl Workspace {
@@ -43,6 +48,7 @@ impl Workspace {
             menu: false,
             error: None,
             focus: cx.focus_handle(),
+            dragging: false,
         };
         match daemon::config_dir().and_then(|dir| Ok((daemon::machines(&dir)?, dir))) {
             Ok((machines, dir)) => {
@@ -55,7 +61,7 @@ impl Workspace {
         if let Some(machine) = workspace.machines.first().cloned() {
             workspace.open(machine, window, cx);
         }
-        cx.on_app_quit(Self::quit).detach();
+        cx.on_release(Self::end_sessions).detach();
         workspace
     }
 
@@ -137,21 +143,25 @@ impl Workspace {
         }
     }
 
-    /// Ends the sessions of every tab before the app quits, as closing them would.
-    fn quit(&mut self, cx: &mut Context<Self>) -> impl Future<Output = ()> + use<> {
+    /// Ends the sessions of every tab as the window goes, as closing them would.
+    fn end_sessions(&mut self, cx: &mut App) {
         let ended: Vec<_> = self
             .tabs
             .iter()
             .filter_map(|view| view.update(cx, |view, _| view.terminate()))
             .collect();
-        let timeout = cx.background_executor().timer(QUIT_TIMEOUT);
-        async move {
-            let ended = futures::future::join_all(ended);
-            futures::future::select(std::pin::pin!(ended), timeout).await;
-        }
+        // The app may be about to exit, so wait here for the daemon to hear of it.
+        crate::runtime().block_on(async {
+            let _ = tokio::time::timeout(QUIT_TIMEOUT, futures::future::join_all(ended)).await;
+        });
     }
 
-    fn render_titlebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_titlebar(
+        &mut self,
+        tiling: Option<Tiling>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let mac = cfg!(target_os = "macos");
         let tabs = self.tabs.iter().enumerate().map(|(index, view)| {
             let view = view.read(cx);
@@ -161,6 +171,7 @@ impl Workspace {
             };
             self.render_tab(index, label, cx)
         });
+        let tabs: Vec<_> = tabs.collect();
 
         div()
             .id("titlebar")
@@ -173,13 +184,25 @@ impl Workspace {
             .bg(theme::titlebar())
             .border_b_1()
             .border_color(theme::border())
+            .when_some(tiling, |bar, tiling| rounded(bar, tiling, true, false))
             .when(mac, |bar| bar.pl(px(80.)))
             .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(MouseButton::Left, |event, window, _| {
-                if event.click_count == 2 {
-                    window.titlebar_double_click();
-                } else {
+            // The window moves once the mouse drags it, so that a double click reaches the app.
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.dragging = true))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.dragging = false))
+            .on_mouse_down_out(cx.listener(|this, _, _, _| this.dragging = false))
+            .on_mouse_move(cx.listener(|this, _, window, _| {
+                if std::mem::take(&mut this.dragging) {
                     window.start_window_move();
+                }
+            }))
+            .on_click(|event, window, _| {
+                if event.click_count() == 2 {
+                    if cfg!(target_os = "macos") {
+                        window.titlebar_double_click();
+                    } else if cfg!(target_os = "linux") || cfg!(target_os = "freebsd") {
+                        window.zoom_window();
+                    }
                 }
             })
             .on_mouse_down(MouseButton::Right, |event, window, _| {
@@ -298,7 +321,6 @@ impl Workspace {
             .items_center()
             .justify_center()
             .gap_2()
-            .bg(theme::background())
             .text_color(theme::foreground());
         if let Some(error) = &self.error {
             return page
@@ -334,30 +356,72 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let decorations = window.window_decorations();
+        let tiling = match window.window_decorations() {
+            Decorations::Client { tiling } => Some(tiling),
+            Decorations::Server => None,
+        };
+        window.set_client_inset(if tiling.is_some() { SHADOW } else { px(0.) });
+
         let body = match self.tabs.get(self.active) {
             Some(view) => div().flex_1().min_h_0().child(view.clone()).into_any_element(),
             None => self.render_machines(cx),
         };
-        div()
+        let content = div()
             .id("workspace")
             .key_context("Workspace")
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
-            .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(theme::background())
             .font_family(".SystemUIFont")
-            .child(self.render_titlebar(window, cx))
-            .child(body)
-            .when(matches!(decorations, Decorations::Client { .. }), |root| {
-                root.child(resize_handles())
-            })
+            .child(self.render_titlebar(tiling, window, cx))
+            .child(body);
+        let Some(tiling) = tiling else {
+            return content.into_any_element();
+        };
+
+        // A window that draws its own decorations: rounded, with a border, and a shadow in the
+        // room around it, but for the sides against a screen edge or another window.
+        let content = rounded(content, tiling, true, true)
+            .border_color(theme::border())
+            .when(!tiling.top, |div| div.border_t_1())
+            .when(!tiling.bottom, |div| div.border_b_1())
+            .when(!tiling.left, |div| div.border_l_1())
+            .when(!tiling.right, |div| div.border_r_1())
+            .when(!tiling.is_tiled(), |div| {
+                div.shadow(vec![BoxShadow {
+                    color: hsla(0., 0., 0., 0.4),
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: SHADOW / 2.,
+                    spread_radius: px(0.),
+                }])
+            });
+        div()
+            .id("window")
+            .relative()
+            .size_full()
+            .when(!tiling.top, |div| div.pt(SHADOW))
+            .when(!tiling.bottom, |div| div.pb(SHADOW))
+            .when(!tiling.left, |div| div.pl(SHADOW))
+            .when(!tiling.right, |div| div.pr(SHADOW))
+            .child(content)
+            .child(resize_handles(tiling))
+            .into_any_element()
     }
+}
+
+/// Rounds element's top or bottom corners, but for those against a screen edge or another
+/// window.
+fn rounded<E: Styled + FluentBuilder>(element: E, tiling: Tiling, top: bool, bottom: bool) -> E {
+    element
+        .when(top && !tiling.top && !tiling.left, |e| e.rounded_tl(ROUNDING))
+        .when(top && !tiling.top && !tiling.right, |e| e.rounded_tr(ROUNDING))
+        .when(bottom && !tiling.bottom && !tiling.left, |e| e.rounded_bl(ROUNDING))
+        .when(bottom && !tiling.bottom && !tiling.right, |e| e.rounded_br(ROUNDING))
 }
 
 /// A small titlebar button.
@@ -415,20 +479,19 @@ fn window_controls(window: &Window) -> impl IntoElement {
         )
 }
 
-/// Lets a window that draws its own decorations be resized from its edges.
-fn resize_handles() -> impl IntoElement {
+/// Lets a window that draws its own decorations be resized from the room around it.
+fn resize_handles(tiling: Tiling) -> impl IntoElement {
     canvas(
         |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-        |_, hitbox: Hitbox, window, _| {
-            let size = window.window_bounds().get_bounds().size;
-            if let Some(edge) = resize_edge(window.mouse_position(), size) {
+        move |_, hitbox: Hitbox, window, _| {
+            if let Some(edge) = resize_edge(window.mouse_position(), window.viewport_size(), tiling) {
                 window.set_cursor_style(resize_cursor(edge), &hitbox);
             }
             window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                 if !phase.bubble() || event.button != MouseButton::Left {
                     return;
                 }
-                if let Some(edge) = resize_edge(event.position, window.window_bounds().get_bounds().size) {
+                if let Some(edge) = resize_edge(event.position, window.viewport_size(), tiling) {
                     window.start_window_resize(edge);
                     cx.stop_propagation();
                 }
@@ -439,19 +502,32 @@ fn resize_handles() -> impl IntoElement {
     .size_full()
 }
 
-fn resize_edge(position: Point<Pixels>, size: Size<Pixels>) -> Option<ResizeEdge> {
-    let near = |v: Pixels, max: Pixels| (v < RESIZE_BORDER, v > max - RESIZE_BORDER);
-    let (left, right) = near(position.x, size.width);
-    let (top, bottom) = near(position.y, size.height);
-    Some(match (top, bottom, left, right) {
-        (true, _, true, _) => ResizeEdge::TopLeft,
-        (true, _, _, true) => ResizeEdge::TopRight,
-        (_, true, true, _) => ResizeEdge::BottomLeft,
-        (_, true, _, true) => ResizeEdge::BottomRight,
-        (true, ..) => ResizeEdge::Top,
-        (_, true, ..) => ResizeEdge::Bottom,
-        (_, _, true, _) => ResizeEdge::Left,
-        (_, _, _, true) => ResizeEdge::Right,
+/// The edge of the window position is on, in the room around it. Corners reach a little further,
+/// to be easier to grab.
+fn resize_edge(position: Point<Pixels>, size: Size<Pixels>, tiling: Tiling) -> Option<ResizeEdge> {
+    let near = |v: Pixels, max: Pixels, reach: Pixels| (v < reach, v > max - reach);
+    let (left, right) = near(position.x, size.width, SHADOW * 1.5);
+    let (top, bottom) = near(position.y, size.height, SHADOW * 1.5);
+    let corner = |vertical: bool, horizontal: bool| vertical && horizontal;
+    if !tiling.top && corner(top, left) {
+        return Some(ResizeEdge::TopLeft);
+    }
+    if !tiling.top && corner(top, right) {
+        return Some(ResizeEdge::TopRight);
+    }
+    if !tiling.bottom && corner(bottom, left) {
+        return Some(ResizeEdge::BottomLeft);
+    }
+    if !tiling.bottom && corner(bottom, right) {
+        return Some(ResizeEdge::BottomRight);
+    }
+    let (left, right) = near(position.x, size.width, SHADOW);
+    let (top, bottom) = near(position.y, size.height, SHADOW);
+    Some(match () {
+        _ if top && !tiling.top => ResizeEdge::Top,
+        _ if bottom && !tiling.bottom => ResizeEdge::Bottom,
+        _ if left && !tiling.left => ResizeEdge::Left,
+        _ if right && !tiling.right => ResizeEdge::Right,
         _ => return None,
     })
 }
