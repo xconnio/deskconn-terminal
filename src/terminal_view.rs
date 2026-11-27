@@ -1,17 +1,22 @@
 //! A tab's terminal: the session's output taken in by libghostty-vt and drawn from its
 //! render state, and the user's keys sent to it.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
+use std::time::Duration;
 
 use ghostty_vt::Terminal;
-use ghostty_vt::render::{CellIterator, CursorVisualStyle, RenderState, RowIterator};
+use ghostty_vt::render::{
+    CellIteration, CellIterator, Colors, CursorVisualStyle, Dirty, RenderState, RowId, RowIterator,
+};
 use ghostty_vt::screen::{CellWide, Screen};
 use ghostty_vt::style::{StyleColor, Underline};
 use ghostty_vt::terminal::{Event as TermEvent, Mode, Options, ScrollViewport};
 use gpui::{
     App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, Hsla,
-    KeyDownEvent, MouseButton, PaintQuad, Pixels, ScrollWheelEvent, ShapedLine, StrikethroughStyle, TextAlign, TextRun,
-    UnderlineStyle, Window, actions, canvas, div, fill, outline, point, prelude::*, px, size,
+    KeyDownEvent, MouseButton, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, Size, StrikethroughStyle, Task,
+    TextAlign, TextRun, UnderlineStyle, Window, actions, canvas, div, fill, outline, point, prelude::*, px, size,
 };
 use tokio::sync::mpsc;
 
@@ -24,6 +29,8 @@ actions!(terminal, [Paste]);
 
 const FONT_SIZE: Pixels = px(14.);
 const LINE_HEIGHT: f32 = 1.3;
+/// How long the terminal's size has to stay the same before the shell is told of it.
+const RESIZE_DELAY: Duration = Duration::from_millis(100);
 
 /// The session ended: the tab is to close.
 pub struct Closed;
@@ -42,7 +49,11 @@ pub struct TerminalView {
     /// The title the shell set, if any.
     pub title: Option<String>,
     /// The size of a cell, once laid out.
-    cell: Option<gpui::Size<Pixels>>,
+    cell: Option<Size<Pixels>>,
+    /// The rows last laid out, to draw again while they're unchanged.
+    shaped: HashMap<RowId, Rc<ShapedRow>>,
+    /// Telling the shell of a new size, once it has settled.
+    resize: Option<Task<()>>,
     /// Scrolling not yet a whole line.
     scroll: Pixels,
 }
@@ -100,6 +111,8 @@ impl TerminalView {
             focus: cx.focus_handle(),
             title: None,
             cell: None,
+            shaped: HashMap::new(),
+            resize: None,
             scroll: px(0.),
         })
     }
@@ -216,143 +229,216 @@ impl TerminalView {
         }
     }
 
-    /// Sizes the terminal to fit bounds, with cells of cell.
-    fn fit(&mut self, bounds: Bounds<Pixels>, cell: gpui::Size<Pixels>) {
-        self.cell = Some(cell);
+    /// Sizes the terminal to fit bounds, with cells of cell. The shell hears of a new size once it
+    /// has settled, so that dragging the window's edge doesn't make it redraw at every step.
+    fn fit(&mut self, bounds: Bounds<Pixels>, cell: Size<Pixels>, cx: &mut Context<Self>) {
+        if self.cell != Some(cell) {
+            self.cell = Some(cell);
+            self.shaped.clear();
+        }
         let cols = ((bounds.size.width / cell.width) as u16).max(2);
         let rows = ((bounds.size.height / cell.height) as u16).max(1);
-        if (Ok(cols), Ok(rows)) != (self.term.cols(), self.term.rows()) {
-            let (w, h) = (f32::from(cell.width) as u32, f32::from(cell.height) as u32);
-            if self.term.resize(cols, rows, w, h).is_ok() {
-                let _ = self.commands.send(Command::Resize { cols, rows });
-            }
+        if (Ok(cols), Ok(rows)) == (self.term.cols(), self.term.rows()) {
+            return;
+        }
+        let (width, height) = (f32::from(cell.width) as u32, f32::from(cell.height) as u32);
+        if self.term.resize(cols, rows, width, height).is_ok() {
+            self.resize = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(RESIZE_DELAY).await;
+                let _ = this.update(cx, |view, _| view.commands.send(Command::Resize { cols, rows }));
+            }));
         }
     }
 
-    /// Shapes what's on screen, for paint.
+    /// Lays out what's on screen, for paint. Rows that haven't changed keep their shaped text.
     fn layout(
         &mut self,
         bounds: Bounds<Pixels>,
-        cell: gpui::Size<Pixels>,
+        cell: Size<Pixels>,
         focused: bool,
         window: &mut Window,
     ) -> ghostty_vt::error::Result<Layout> {
         let snapshot = self.render.update(&self.term)?;
+        if snapshot.dirty()? == Dirty::Full {
+            self.shaped.clear();
+        }
         let colors = snapshot.colors()?;
         let cursor = snapshot.cursor()?;
-        let default_fg = theme::to_hsla(colors.foreground);
-        let default_bg = theme::to_hsla(colors.background);
-        let cursor_color = colors.cursor.map_or(default_fg, theme::to_hsla);
-        let cursor_at = cursor.viewport.filter(|_| cursor.visible);
-        let block_cursor = focused && cursor.visual_style == CursorVisualStyle::Block;
         let at = |row: u16, col: u16| bounds.origin + point(cell.width * f32::from(col), cell.height * f32::from(row));
 
         let mut layout = Layout {
-            backgrounds: Vec::new(),
-            lines: Vec::new(),
+            rows: Vec::new(),
             cursor: None,
         };
-        let mut text = String::new();
+        let mut shaped = HashMap::with_capacity(self.shaped.len());
         let mut rows = self.rows.update(&snapshot)?;
         let mut y = 0;
         while let Some(row) = rows.next() {
-            let mut segment: Option<Segment> = None;
-            let mut cells = self.cells.update(row)?;
-            let mut x = 0;
-            while let Some(c) = cells.next() {
-                let col = x;
-                x += 1;
-                let width = match c.raw_cell()?.wide()? {
-                    CellWide::SpacerTail | CellWide::SpacerHead => continue,
-                    CellWide::Wide => 2,
-                    _ => 1,
-                };
-                let style = c.style()?;
-                // Bold text of a normal ANSI color is drawn in its bright variant.
-                let fg = match style.fg_color {
-                    StyleColor::Palette(i) if style.bold && i.0 < 8 => Some(colors.palette[i.0 as usize + 8]),
-                    _ => c.fg_color()?,
-                };
-                let mut fg = fg.map_or(default_fg, theme::to_hsla);
-                let mut bg = c.bg_color()?.map_or(default_bg, theme::to_hsla);
-                if style.faint {
-                    fg = fg.opacity(0.66);
-                }
-                if style.inverse {
-                    std::mem::swap(&mut fg, &mut bg);
-                }
-                if style.invisible {
-                    fg = bg;
-                }
-                if block_cursor && cursor_at.is_some_and(|at| (at.x, at.y) == (col, y)) {
-                    (fg, bg) = (default_bg, cursor_color);
-                }
+            let id = row.id()?;
+            let line = match self.shaped.remove(&id).filter(|_| !row.dirty().unwrap_or(true)) {
+                Some(line) => line,
+                None => Rc::new(shape_row(&mut self.cells.update(row)?, &colors, cell, window)?),
+            };
+            layout.rows.push((at(y, 0), line.clone()));
+            shaped.insert(id, line);
 
-                if bg != default_bg {
-                    let bounds = Bounds::new(at(y, col), size(cell.width * width as f32, cell.height));
-                    match layout.backgrounds.last_mut() {
-                        Some((last, color)) if *color == bg && last.top_right() == bounds.origin => {
-                            last.size.width += bounds.size.width;
+            if let Some(position) = cursor.viewport.filter(|position| cursor.visible && position.y == y) {
+                let x = if position.at_wide_tail {
+                    position.x.saturating_sub(1)
+                } else {
+                    position.x
+                };
+                let mut cells = self.cells.update(row)?;
+                cells.select(x)?;
+                let wide = cells.raw_cell()?.wide()? == CellWide::Wide;
+                let origin = at(y, x);
+                let width = if wide { cell.width * 2. } else { cell.width };
+                let color = colors.cursor.unwrap_or(colors.foreground);
+                layout.cursor = Some(match cursor.visual_style {
+                    CursorVisualStyle::Block if focused => {
+                        // The character under the cursor, in the background's color.
+                        let style = cells.style()?;
+                        let mut text = String::new();
+                        cells.graphemes_utf8(&mut text)?;
+                        let look = Look {
+                            fg: theme::to_hsla(colors.background),
+                            bold: style.bold,
+                            italic: style.italic,
+                            underline: Underline::None,
+                            strike: false,
+                        };
+                        let glyph = Segment {
+                            col: x,
+                            cells: 1 + u16::from(wide),
+                            wide,
+                            look,
+                            text,
                         }
-                        _ => layout.backgrounds.push((bounds, bg)),
+                        .shape(cell, window);
+                        Cursor {
+                            quad: fill(Bounds::new(origin, size(width, cell.height)), theme::to_hsla(color)),
+                            glyph: glyph.map(|glyph| (origin, glyph)),
+                        }
                     }
-                }
-
-                text.clear();
-                c.graphemes_utf8(&mut text)?;
-                if text.is_empty() {
-                    text.push(' ');
-                }
-                let look = Look {
-                    fg,
-                    bold: style.bold,
-                    italic: style.italic,
-                    underline: style.underline,
-                    strike: style.strikethrough,
-                };
-                let continues = segment
-                    .as_ref()
-                    .is_some_and(|s| s.col + s.cells == col && s.look == look && width == 1 && !s.wide);
-                if !continues {
-                    if let Some(done) = segment.take() {
-                        layout
-                            .lines
-                            .extend(done.shape(cell, window).map(|line| (at(y, done.col), line)));
-                    }
-                    segment = Some(Segment {
-                        col,
-                        cells: 0,
-                        wide: width == 2,
-                        look,
-                        text: String::new(),
-                    });
-                }
-                let s = segment.as_mut().expect("a segment was just started");
-                s.text.push_str(&text);
-                s.cells += width;
-            }
-            if let Some(done) = segment {
-                layout
-                    .lines
-                    .extend(done.shape(cell, window).map(|line| (at(y, done.col), line)));
+                    CursorVisualStyle::Bar => Cursor {
+                        quad: fill(Bounds::new(origin, size(px(2.), cell.height)), theme::to_hsla(color)),
+                        glyph: None,
+                    },
+                    CursorVisualStyle::Underline => Cursor {
+                        quad: fill(
+                            Bounds::new(origin + point(px(0.), cell.height - px(2.)), size(width, px(2.))),
+                            theme::to_hsla(color),
+                        ),
+                        glyph: None,
+                    },
+                    _ => Cursor {
+                        quad: outline(
+                            Bounds::new(origin, size(width, cell.height)),
+                            theme::to_hsla(color),
+                            gpui::BorderStyle::Solid,
+                        ),
+                        glyph: None,
+                    },
+                });
             }
             y += 1;
         }
-
-        if let Some(cursor_at) = cursor_at.filter(|_| !block_cursor) {
-            let origin = at(cursor_at.y, cursor_at.x);
-            layout.cursor = Some(match cursor.visual_style {
-                CursorVisualStyle::Bar => fill(Bounds::new(origin, size(px(2.), cell.height)), cursor_color),
-                CursorVisualStyle::Underline => fill(
-                    Bounds::new(origin + point(px(0.), cell.height - px(2.)), size(cell.width, px(2.))),
-                    cursor_color,
-                ),
-                _ => outline(Bounds::new(origin, cell), cursor_color, gpui::BorderStyle::Solid),
-            });
-        }
+        self.shaped = shaped;
         snapshot.clean()?;
         Ok(layout)
     }
+}
+
+/// Shapes a row's text, and lays out the backgrounds that differ from the terminal's.
+fn shape_row(
+    cells: &mut CellIteration<'_>,
+    colors: &Colors,
+    cell: Size<Pixels>,
+    window: &mut Window,
+) -> ghostty_vt::error::Result<ShapedRow> {
+    let default_fg = theme::to_hsla(colors.foreground);
+    let default_bg = theme::to_hsla(colors.background);
+    let at = |col: u16| point(cell.width * f32::from(col), px(0.));
+    let mut row = ShapedRow {
+        backgrounds: Vec::new(),
+        lines: Vec::new(),
+    };
+    let mut segment: Option<Segment> = None;
+    let mut text = String::new();
+    let mut x = 0;
+    while let Some(c) = cells.next() {
+        let col = x;
+        x += 1;
+        let width = match c.raw_cell()?.wide()? {
+            CellWide::SpacerTail | CellWide::SpacerHead => continue,
+            CellWide::Wide => 2,
+            _ => 1,
+        };
+        let style = c.style()?;
+        // Bold text of a normal ANSI color is drawn in its bright variant.
+        let fg = match style.fg_color {
+            StyleColor::Palette(i) if style.bold && i.0 < 8 => Some(colors.palette[i.0 as usize + 8]),
+            _ => c.fg_color()?,
+        };
+        let mut fg = fg.map_or(default_fg, theme::to_hsla);
+        let mut bg = c.bg_color()?.map_or(default_bg, theme::to_hsla);
+        if style.faint {
+            fg = fg.opacity(0.66);
+        }
+        if style.inverse {
+            std::mem::swap(&mut fg, &mut bg);
+        }
+        if style.invisible {
+            fg = bg;
+        }
+
+        if bg != default_bg {
+            let bounds = Bounds::new(at(col), size(cell.width * f32::from(width), cell.height));
+            match row.backgrounds.last_mut() {
+                Some((last, color)) if *color == bg && last.top_right() == bounds.origin => {
+                    last.size.width += bounds.size.width;
+                }
+                _ => row.backgrounds.push((bounds, bg)),
+            }
+        }
+
+        text.clear();
+        c.graphemes_utf8(&mut text)?;
+        if text.is_empty() {
+            text.push(' ');
+        }
+        let look = Look {
+            fg,
+            bold: style.bold,
+            italic: style.italic,
+            underline: style.underline,
+            strike: style.strikethrough,
+        };
+        let continues = segment
+            .as_ref()
+            .is_some_and(|s| s.col + s.cells == col && s.look == look && width == 1 && !s.wide);
+        if !continues {
+            if let Some(done) = segment.take() {
+                row.lines
+                    .extend(done.shape(cell, window).map(|line| (at(done.col), line)));
+            }
+            segment = Some(Segment {
+                col,
+                cells: 0,
+                wide: width == 2,
+                look,
+                text: String::new(),
+            });
+        }
+        let s = segment.as_mut().expect("a segment was just started");
+        s.text.push_str(&text);
+        s.cells += width;
+    }
+    if let Some(done) = segment {
+        row.lines
+            .extend(done.shape(cell, window).map(|line| (at(done.col), line)));
+    }
+    Ok(row)
 }
 
 impl Render for TerminalView {
@@ -373,13 +459,12 @@ impl Render for TerminalView {
             .size_full()
             .px_2()
             .pt_1()
-            .bg(theme::background())
             .child(
                 canvas(
                     move |bounds, window, cx| {
                         let cell = cell_size(window);
-                        view.update(cx, |view, _| {
-                            view.fit(bounds, cell);
+                        view.update(cx, |view, cx| {
+                            view.fit(bounds, cell, cx);
                             view.layout(bounds, cell, focused, window).ok()
                         })
                     },
@@ -395,7 +480,7 @@ impl Render for TerminalView {
 }
 
 /// The size of a cell in the terminal's font.
-fn cell_size(window: &Window) -> gpui::Size<Pixels> {
+fn cell_size(window: &Window) -> Size<Pixels> {
     let text = window.text_system();
     let font_id = text.resolve_font(&terminal_font());
     let width = text
@@ -417,22 +502,40 @@ fn terminal_font() -> Font {
 
 /// What's on screen, ready to paint.
 struct Layout {
+    rows: Vec<(Point<Pixels>, Rc<ShapedRow>)>,
+    cursor: Option<Cursor>,
+}
+
+/// A row's backgrounds and text, placed from the row's origin.
+struct ShapedRow {
     backgrounds: Vec<(Bounds<Pixels>, Hsla)>,
-    lines: Vec<(gpui::Point<Pixels>, ShapedLine)>,
-    cursor: Option<PaintQuad>,
+    lines: Vec<(Point<Pixels>, ShapedLine)>,
+}
+
+/// The cursor, and the character it covers when it's a block.
+struct Cursor {
+    quad: PaintQuad,
+    glyph: Option<(Point<Pixels>, ShapedLine)>,
 }
 
 impl Layout {
     fn paint(self, window: &mut Window, cx: &mut App) {
         let line_height = (FONT_SIZE * LINE_HEIGHT).round();
-        for (bounds, color) in self.backgrounds {
-            window.paint_quad(fill(bounds, color));
+        for (origin, row) in &self.rows {
+            for (bounds, color) in &row.backgrounds {
+                window.paint_quad(fill(Bounds::new(*origin + bounds.origin, bounds.size), *color));
+            }
         }
-        for (origin, line) in self.lines {
-            let _ = line.paint(origin, line_height, TextAlign::Left, None, window, cx);
+        for (origin, row) in &self.rows {
+            for (at, line) in &row.lines {
+                let _ = line.paint(*origin + *at, line_height, TextAlign::Left, None, window, cx);
+            }
         }
         if let Some(cursor) = self.cursor {
-            window.paint_quad(cursor);
+            window.paint_quad(cursor.quad);
+            if let Some((origin, glyph)) = cursor.glyph {
+                let _ = glyph.paint(origin, line_height, TextAlign::Left, None, window, cx);
+            }
         }
     }
 }
@@ -459,7 +562,7 @@ struct Segment {
 
 impl Segment {
     /// The segment shaped, unless there's nothing to draw.
-    fn shape(&self, cell: gpui::Size<Pixels>, window: &mut Window) -> Option<ShapedLine> {
+    fn shape(&self, cell: Size<Pixels>, window: &mut Window) -> Option<ShapedLine> {
         let look = self.look;
         let decorated = look.underline != Underline::None || look.strike;
         if self.text.trim().is_empty() && !decorated {
