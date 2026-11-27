@@ -39,6 +39,9 @@ make release  # optimized build in target/release/
 | Ctrl+Tab, Ctrl+Page Down             | Cmd+Shift+]                 | Next tab         |
 | Ctrl+Shift+Tab, Ctrl+Page Up         | Cmd+Shift+[                 | Previous tab     |
 | Ctrl+Shift+V, Shift+Insert           | Cmd+V                       | Paste            |
+| Ctrl+=                               | Cmd+=                       | Larger font      |
+| Ctrl+-                               | Cmd+-                       | Smaller font     |
+| Ctrl+0                               | Cmd+0                       | Default font size |
 
 `+` opens a tab on the machine of the current one; `▾` picks another machine.
 

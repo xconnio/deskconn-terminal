@@ -14,9 +14,9 @@ use ghostty_vt::screen::{CellWide, Screen};
 use ghostty_vt::style::{StyleColor, Underline};
 use ghostty_vt::terminal::{Event as TermEvent, Mode, Options, ScrollViewport};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, Hsla,
-    KeyDownEvent, MouseButton, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, Size, StrikethroughStyle, Task,
-    TextAlign, TextRun, UnderlineStyle, Window, actions, canvas, div, fill, outline, point, prelude::*, px, size,
+    App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, Global,
+    Hsla, KeyDownEvent, MouseButton, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, Size, StrikethroughStyle,
+    Task, TextAlign, TextRun, UnderlineStyle, Window, actions, canvas, div, fill, outline, point, prelude::*, px, size,
 };
 use tokio::sync::mpsc;
 
@@ -25,12 +25,30 @@ use crate::keys::KeyEncoder;
 use crate::session::{self, Command, Event};
 use crate::theme;
 
-actions!(terminal, [Paste]);
+actions!(terminal, [Paste, IncreaseFontSize, DecreaseFontSize, ResetFontSize]);
 
-const FONT_SIZE: Pixels = px(14.);
+const DEFAULT_FONT_SIZE: Pixels = px(14.);
+/// The smallest and largest font sizes the user can pick.
+const FONT_SIZES: (f32, f32) = (8., 40.);
 const LINE_HEIGHT: f32 = 1.3;
 /// How long the terminal's size has to stay the same before the shell is told of it.
 const RESIZE_DELAY: Duration = Duration::from_millis(100);
+
+/// The terminals' font size, as the user set it.
+struct FontSize(Pixels);
+
+impl Global for FontSize {}
+
+fn font_size(cx: &App) -> Pixels {
+    cx.try_global::<FontSize>().map_or(DEFAULT_FONT_SIZE, |size| size.0)
+}
+
+/// Sets every terminal's font size.
+fn set_font_size(size: Pixels, cx: &mut App) {
+    let (min, max) = FONT_SIZES;
+    cx.set_global(FontSize(px(f32::from(size).clamp(min, max))));
+    cx.refresh_windows();
+}
 
 /// The session ended: the tab is to close.
 pub struct Closed;
@@ -50,6 +68,8 @@ pub struct TerminalView {
     pub title: Option<String>,
     /// The size of a cell, once laid out.
     cell: Option<Size<Pixels>>,
+    /// The font size the rows were shaped in.
+    font_size: Pixels,
     /// The rows last laid out, to draw again while they're unchanged.
     shaped: HashMap<RowId, Rc<ShapedRow>>,
     /// Telling the shell of a new size, once it has settled.
@@ -111,6 +131,7 @@ impl TerminalView {
             focus: cx.focus_handle(),
             title: None,
             cell: None,
+            font_size: DEFAULT_FONT_SIZE,
             shaped: HashMap::new(),
             resize: None,
             scroll: px(0.),
@@ -231,9 +252,9 @@ impl TerminalView {
 
     /// Sizes the terminal to fit bounds, with cells of cell. The shell hears of a new size once it
     /// has settled, so that dragging the window's edge doesn't make it redraw at every step.
-    fn fit(&mut self, bounds: Bounds<Pixels>, cell: Size<Pixels>, cx: &mut Context<Self>) {
-        if self.cell != Some(cell) {
-            self.cell = Some(cell);
+    fn fit(&mut self, bounds: Bounds<Pixels>, font_size: Pixels, cell: Size<Pixels>, cx: &mut Context<Self>) {
+        if (self.cell, self.font_size) != (Some(cell), font_size) {
+            (self.cell, self.font_size) = (Some(cell), font_size);
             self.shaped.clear();
         }
         let cols = ((bounds.size.width / cell.width) as u16).max(2);
@@ -254,6 +275,7 @@ impl TerminalView {
     fn layout(
         &mut self,
         bounds: Bounds<Pixels>,
+        font_size: Pixels,
         cell: Size<Pixels>,
         focused: bool,
         window: &mut Window,
@@ -267,6 +289,7 @@ impl TerminalView {
         let at = |row: u16, col: u16| bounds.origin + point(cell.width * f32::from(col), cell.height * f32::from(row));
 
         let mut layout = Layout {
+            line_height: cell.height,
             rows: Vec::new(),
             cursor: None,
         };
@@ -277,7 +300,13 @@ impl TerminalView {
             let id = row.id()?;
             let line = match self.shaped.remove(&id).filter(|_| !row.dirty().unwrap_or(true)) {
                 Some(line) => line,
-                None => Rc::new(shape_row(&mut self.cells.update(row)?, &colors, cell, window)?),
+                None => Rc::new(shape_row(
+                    &mut self.cells.update(row)?,
+                    &colors,
+                    font_size,
+                    cell,
+                    window,
+                )?),
             };
             layout.rows.push((at(y, 0), line.clone()));
             shaped.insert(id, line);
@@ -314,7 +343,7 @@ impl TerminalView {
                             look,
                             text,
                         }
-                        .shape(cell, window);
+                        .shape(font_size, cell, window);
                         Cursor {
                             quad: fill(Bounds::new(origin, size(width, cell.height)), theme::to_hsla(color)),
                             glyph: glyph.map(|glyph| (origin, glyph)),
@@ -353,6 +382,7 @@ impl TerminalView {
 fn shape_row(
     cells: &mut CellIteration<'_>,
     colors: &Colors,
+    font_size: Pixels,
     cell: Size<Pixels>,
     window: &mut Window,
 ) -> ghostty_vt::error::Result<ShapedRow> {
@@ -420,7 +450,7 @@ fn shape_row(
         if !continues {
             if let Some(done) = segment.take() {
                 row.lines
-                    .extend(done.shape(cell, window).map(|line| (at(done.col), line)));
+                    .extend(done.shape(font_size, cell, window).map(|line| (at(done.col), line)));
             }
             segment = Some(Segment {
                 col,
@@ -436,7 +466,7 @@ fn shape_row(
     }
     if let Some(done) = segment {
         row.lines
-            .extend(done.shape(cell, window).map(|line| (at(done.col), line)));
+            .extend(done.shape(font_size, cell, window).map(|line| (at(done.col), line)));
     }
     Ok(row)
 }
@@ -451,6 +481,9 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(Self::paste))
+            .on_action(|_: &IncreaseFontSize, _, cx| set_font_size(font_size(cx) + px(1.), cx))
+            .on_action(|_: &DecreaseFontSize, _, cx| set_font_size(font_size(cx) - px(1.), cx))
+            .on_action(|_: &ResetFontSize, _, cx| set_font_size(DEFAULT_FONT_SIZE, cx))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(
                 MouseButton::Left,
@@ -462,10 +495,11 @@ impl Render for TerminalView {
             .child(
                 canvas(
                     move |bounds, window, cx| {
-                        let cell = cell_size(window);
+                        let font_size = font_size(cx);
+                        let cell = cell_size(font_size, window);
                         view.update(cx, |view, cx| {
-                            view.fit(bounds, cell, cx);
-                            view.layout(bounds, cell, focused, window).ok()
+                            view.fit(bounds, font_size, cell, cx);
+                            view.layout(bounds, font_size, cell, focused, window).ok()
                         })
                     },
                     move |_bounds, layout, window, cx| {
@@ -479,14 +513,14 @@ impl Render for TerminalView {
     }
 }
 
-/// The size of a cell in the terminal's font.
-fn cell_size(window: &Window) -> Size<Pixels> {
+/// The size of a cell in the terminal's font, at font_size.
+fn cell_size(font_size: Pixels, window: &Window) -> Size<Pixels> {
     let text = window.text_system();
     let font_id = text.resolve_font(&terminal_font());
     let width = text
-        .advance(font_id, FONT_SIZE, 'm')
-        .map_or(FONT_SIZE * 0.6, |advance| advance.width);
-    size(width, (FONT_SIZE * LINE_HEIGHT).round())
+        .advance(font_id, font_size, 'm')
+        .map_or(font_size * 0.6, |advance| advance.width);
+    size(width, (font_size * LINE_HEIGHT).round())
 }
 
 fn terminal_font() -> Font {
@@ -502,6 +536,7 @@ fn terminal_font() -> Font {
 
 /// What's on screen, ready to paint.
 struct Layout {
+    line_height: Pixels,
     rows: Vec<(Point<Pixels>, Rc<ShapedRow>)>,
     cursor: Option<Cursor>,
 }
@@ -520,7 +555,7 @@ struct Cursor {
 
 impl Layout {
     fn paint(self, window: &mut Window, cx: &mut App) {
-        let line_height = (FONT_SIZE * LINE_HEIGHT).round();
+        let line_height = self.line_height;
         for (origin, row) in &self.rows {
             for (bounds, color) in &row.backgrounds {
                 window.paint_quad(fill(Bounds::new(*origin + bounds.origin, bounds.size), *color));
@@ -562,7 +597,7 @@ struct Segment {
 
 impl Segment {
     /// The segment shaped, unless there's nothing to draw.
-    fn shape(&self, cell: Size<Pixels>, window: &mut Window) -> Option<ShapedLine> {
+    fn shape(&self, font_size: Pixels, cell: Size<Pixels>, window: &mut Window) -> Option<ShapedLine> {
         let look = self.look;
         let decorated = look.underline != Underline::None || look.strike;
         if self.text.trim().is_empty() && !decorated {
@@ -595,7 +630,7 @@ impl Segment {
         Some(
             window
                 .text_system()
-                .shape_line(self.text.clone().into(), FONT_SIZE, &[run], force_width),
+                .shape_line(self.text.clone().into(), font_size, &[run], force_width),
         )
     }
 }
