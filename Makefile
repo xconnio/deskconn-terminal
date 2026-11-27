@@ -1,24 +1,21 @@
-setup:
-	[ -f .env.local ] || cp .env.example .env.local
-	npm install
-
 run:
-	npm run dev
+	cargo run
 
-# Against a hub running on this machine (see deskconn-web-app's dev-local).
-run-local:
-	VITE_WAMP_WT_URL=https://localhost:8082/wamp \
-	VITE_WAMP_WT_CERT_URL=http://localhost:8083/wt-cert-hash \
-	npm run dev
+test:
+	cargo test
 
-type-check:
-	npm run type-check
+# Needs a running, signed-in deskconn daemon.
+test-daemon:
+	cargo test -- --ignored
 
-# Type-check, build, then AppImage/deb (or dmg/exe) in release/.
-build:
-	npm run package
+check:
+	cargo fmt --check
+	cargo clippy --all-targets -- -D warnings
+
+release:
+	cargo build --release
 
 clean:
-	rm -rf dist/ release/ node_modules/
+	cargo clean
 
-.PHONY: setup run run-local type-check build clean
+.PHONY: run test test-daemon check release clean

@@ -1,17 +1,44 @@
 # DeskConn Terminal
 
-Standalone terminal for your DeskConn machines. The terminal itself is
-deskconn-web-app's `TerminalPanel`, installed from GitHub as an npm dependency.
+A terminal for your DeskConn machines, built with [GPUI](https://www.gpui.rs) and
+[alacritty_terminal](https://crates.io/crates/alacritty_terminal).
 
-It shares the deskconn CLI's sign-in (`~/.deskconn/id_ed25519`): if you're
-logged in with `deskconn auth login` it opens straight to your machines, and
-signing in here (when the key is missing, expired or revoked) logs the CLI in too.
+It connects through the local deskconn daemon (`desk serve`), as the `desk` CLI does, and
+opens the machines the CLI knows about (`desk ls`). Each tab is a persistent session on its
+machine: a lost connection is restored without losing the shell, and closing the tab ends it.
 
 ```sh
-make setup            # .env.example -> .env.local (if missing), npm install (deskconn-web pinned to a commit)
-make run              # dev, with hot reload (make run-local: a hub on localhost)
-make build            # type-check, build, AppImage/deb/dmg/exe in release/
+make run      # build and run
+make test     # unit tests
+make check    # formatting and lints
+make release  # optimized build in target/release/
 ```
 
-It connects to the hub set in `.env.local` (the hosted one by default); change
-`VITE_WAMP_WT_URL` / `VITE_WAMP_WT_CERT_URL` there for another one.
+## Requirements
+
+- A signed-in `desk` CLI with its daemon running (`desk auth login`, then `desk serve`).
+- On Linux, the development packages GPUI builds against, on Debian and Ubuntu:
+
+  ```sh
+  sudo apt install build-essential clang cmake pkg-config libxkbcommon-dev \
+    libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libvulkan-dev \
+    libfontconfig-dev libfreetype-dev libzstd-dev
+  ```
+
+## Keys
+
+| Linux and Windows                    | macOS                       | Action           |
+|--------------------------------------|-----------------------------|------------------|
+| Ctrl+Shift+T                         | Cmd+T                       | New tab          |
+| Ctrl+Shift+W                         | Cmd+W                       | Close tab        |
+| Ctrl+Tab, Ctrl+Page Down             | Cmd+Shift+]                 | Next tab         |
+| Ctrl+Shift+Tab, Ctrl+Page Up         | Cmd+Shift+[                 | Previous tab     |
+| Ctrl+Shift+V, Shift+Insert           | Cmd+V                       | Paste            |
+
+`+` opens a tab on the machine of the current one; `▾` picks another machine.
+
+## Notes
+
+GPUI comes from Zed's repository, at a release tag. Its `zed-async-tar` needs `xattr` 0.2,
+which no longer builds with current `libc`; `vendor/xattr` is that crate with the one-line fix,
+used through `[patch.crates-io]` until GPUI moves on.
