@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use ghostty_vt::Terminal;
+use ghostty_vt::mouse::{Action, Button};
 use ghostty_vt::render::{
     CellIteration, CellIterator, Colors, CursorVisualStyle, Dirty, RenderState, RowId, RowIterator,
 };
@@ -17,14 +18,15 @@ use ghostty_vt::terminal::{Event as TermEvent, Mode, Options, PointCoordinate, S
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
     FontWeight, Hitbox, HitboxBehavior, Hsla, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString,
-    Size, StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle, Window, actions, anchored, canvas, deferred,
-    div, fill, hsla, outline, point, prelude::*, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollDelta, ScrollWheelEvent, ShapedLine,
+    SharedString, Size, StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle, Window, actions, anchored,
+    canvas, deferred, div, fill, hsla, outline, point, prelude::*, px, size,
 };
 use tokio::sync::mpsc;
 
 use crate::daemon::Machine;
 use crate::keys::KeyEncoder;
+use crate::mouse::{self, MouseEncoder};
 use crate::selection::{self, GridPosition, Link, Selector, UNIT};
 use crate::session::{self, Command, Event};
 use crate::settings::Settings;
@@ -56,6 +58,8 @@ const PADDING_TOP: Pixels = px(4.);
 /// The scrollbar's width, within the terminal's right padding, and its thumb's least height.
 const SCROLLBAR_WIDTH: Pixels = px(6.);
 const SCROLLBAR_MIN_THUMB: Pixels = px(48.);
+/// The lines a notch of the mouse wheel scrolls, as GPUI has it.
+const WHEEL_LINES: f32 = 3.;
 /// How often a selection dragged past the top or bottom scrolls a row.
 const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -79,6 +83,9 @@ pub struct TerminalView {
     rows: RowIterator,
     cells: CellIterator,
     keys: KeyEncoder,
+    mouse_encoder: MouseEncoder,
+    /// The button pressed for the program that takes the mouse, until it's let go.
+    reported: Option<MouseButton>,
     commands: mpsc::UnboundedSender<Command>,
     /// The session's task, until it's ended.
     session: Option<tokio::task::JoinHandle<()>>,
@@ -179,6 +186,8 @@ impl TerminalView {
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
             keys: KeyEncoder::new()?,
+            mouse_encoder: MouseEncoder::new()?,
+            reported: None,
             commands,
             session: Some(session),
             focus,
@@ -442,12 +451,24 @@ impl TerminalView {
 
     fn scroll_wheel(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(cell) = self.cell else { return };
-        self.scroll += event.delta.pixel_delta(cell.height).y;
+        let reporting = self.reports_mouse(event.modifiers);
+        self.scroll += match event.delta {
+            // A notch of the wheel scrolls three lines here, but it's a single step to a program.
+            ScrollDelta::Lines(lines) if reporting => cell.height * (lines.y / WHEEL_LINES),
+            delta => delta.pixel_delta(cell.height).y,
+        };
         let lines = (self.scroll / cell.height) as i32;
         if lines == 0 {
             return;
         }
         self.scroll -= cell.height * lines as f32;
+        if reporting {
+            let wheel = if lines > 0 { Button::Four } else { Button::Five };
+            for _ in 0..lines.unsigned_abs() {
+                self.report(Action::Press, Some(wheel), event.position, event.modifiers);
+            }
+            return;
+        }
         let alternate = self
             .term
             .active_screen()
@@ -488,8 +509,45 @@ impl TerminalView {
     }
 
     /// Opens the link clicked with the key for it held, or starts selecting.
+    /// Whether the mouse goes to the program, as it asked; Shift keeps it for selecting.
+    fn reports_mouse(&self, modifiers: Modifiers) -> bool {
+        !modifiers.shift && self.term.is_mouse_tracking().unwrap_or(false)
+    }
+
+    /// Sends the program a mouse event at position, in the window.
+    fn report(&mut self, action: Action, button: Option<Button>, position: Point<Pixels>, modifiers: Modifiers) {
+        let Some(cell) = self.cell else { return };
+        let at = point(
+            (position.x - self.grid.left()) / cell.width,
+            (position.y - self.grid.top()) / cell.height,
+        );
+        let bytes = self
+            .mouse_encoder
+            .encode(&self.term, action, button, modifiers, at, cell);
+        if !bytes.is_empty() {
+            self.send(bytes);
+        }
+    }
+
+    /// Gives the press to the program that takes the mouse; or, for the terminal, opens the link
+    /// clicked with the key for it held, starts selecting, pastes what's selected on Linux, or
+    /// opens the menu.
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
+        if self.reports_mouse(event.modifiers) {
+            if let Some(button) = mouse::button(event.button) {
+                self.reported = Some(event.button);
+                self.report(Action::Press, Some(button), event.position, event.modifiers);
+            }
+            return;
+        }
+        match event.button {
+            MouseButton::Left => {}
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            MouseButton::Middle => return self.paste_primary(window, cx),
+            MouseButton::Right => return self.open_menu(event.position, window, cx),
+            _ => return,
+        }
         let Some(at) = self.grid_position(event.position) else {
             return;
         };
@@ -506,6 +564,14 @@ impl TerminalView {
     }
 
     fn mouse_move(&mut self, position: Point<Pixels>, modifiers: Modifiers, cx: &mut Context<Self>) {
+        if let Some(button) = self.reported {
+            self.report(Action::Motion, mouse::button(button), position, modifiers);
+            return;
+        }
+        if !self.selecting && self.reports_mouse(modifiers) && self.grid.contains(&position) {
+            // For programs that follow the mouse even with no button pressed.
+            self.report(Action::Motion, None, position, modifiers);
+        }
         if !self.selecting {
             self.hover(position, modifiers, cx);
             return;
@@ -542,8 +608,19 @@ impl TerminalView {
     }
 
     /// Ends selecting, and on Linux offers what's selected for a middle click to paste.
-    fn mouse_up(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        if !std::mem::take(&mut self.selecting) {
+    fn mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        if self.reported == Some(event.button) {
+            self.reported = None;
+            self.report(
+                Action::Release,
+                mouse::button(event.button),
+                event.position,
+                event.modifiers,
+            );
+            return;
+        }
+        let position = event.position;
+        if event.button != MouseButton::Left || !std::mem::take(&mut self.selecting) {
             return;
         }
         if let Some(at) = self.grid_position(position) {
@@ -648,6 +725,7 @@ impl TerminalView {
             scrollbar_hitbox: None,
             hitbox: None,
             pointing: self.link.is_some(),
+            reporting: self.term.is_mouse_tracking().unwrap_or(false),
         };
         // A blinking cursor is hidden every other interval, while the terminal has focus.
         let shown = cursor.visible && (!cursor.blinking || !focused || self.blink_on);
@@ -1009,6 +1087,8 @@ struct Layout {
     hitbox: Option<Hitbox>,
     /// Whether the mouse is on a link to open.
     pointing: bool,
+    /// Whether a program takes the mouse.
+    reporting: bool,
 }
 
 /// The scrollbar's track and thumb, where it can be grabbed, and how many rows there are to scroll
@@ -1061,6 +1141,8 @@ impl Layout {
         if let Some(hitbox) = self.hitbox {
             let cursor = if self.pointing {
                 CursorStyle::PointingHand
+            } else if self.reporting {
+                CursorStyle::Arrow
             } else {
                 CursorStyle::IBeam
             };
@@ -1081,13 +1163,7 @@ fn handle_mouse(hitbox: Hitbox, view: &Entity<TerminalView>, window: &mut Window
         if !phase.bubble() || !hitbox.is_hovered(window) {
             return;
         }
-        match event.button {
-            MouseButton::Left => pressed.update(cx, |view, cx| view.mouse_down(event, window, cx)),
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            MouseButton::Middle => pressed.update(cx, |view, cx| view.paste_primary(window, cx)),
-            MouseButton::Right => pressed.update(cx, |view, cx| view.open_menu(event.position, window, cx)),
-            _ => return,
-        }
+        pressed.update(cx, |view, cx| view.mouse_down(event, window, cx));
         cx.stop_propagation();
     });
     let moved = view.clone();
@@ -1098,8 +1174,8 @@ fn handle_mouse(hitbox: Hitbox, view: &Entity<TerminalView>, window: &mut Window
     });
     let released = view.clone();
     window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-        if phase.bubble() && event.button == MouseButton::Left {
-            released.update(cx, |view, cx| view.mouse_up(event.position, cx));
+        if phase.bubble() {
+            released.update(cx, |view, cx| view.mouse_up(event, cx));
         }
     });
 }

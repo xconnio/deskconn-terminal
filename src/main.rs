@@ -5,6 +5,7 @@ mod daemon;
 mod desktop;
 mod keys;
 mod links;
+mod mouse;
 mod palette;
 mod protocol;
 mod selection;

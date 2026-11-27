@@ -52,6 +52,9 @@ make release  # optimized build in target/release/
 Selecting text with the mouse offers it to a middle click on Linux, and Ctrl+click (Cmd+click on
 macOS) opens a link. A right click opens a menu to copy, paste, clear, or reset.
 
+Programs that take the mouse, such as Claude Code, Codex, vim, or htop, get its wheel, clicks, and
+drags; holding Shift keeps them for the terminal, to select text or open the menu.
+
 Clear forgets the scrollback and brings the prompt to the top; Reset puts the terminal back as it
 started, for when a program has left it in a bad state.
 
