@@ -19,6 +19,10 @@ const TITLEBAR_HEIGHT: Pixels = px(38.);
 /// The room around a window that draws its own decorations, for its shadow and its resize
 /// handles.
 const SHADOW: Pixels = px(10.);
+/// How far past its border such a window can be grabbed to resize it, and how much further at
+/// its corners.
+const RESIZE_INSIDE: Pixels = px(3.);
+const RESIZE_CORNER: Pixels = px(8.);
 /// The rounding of such a window's corners.
 const ROUNDING: Pixels = px(10.);
 /// How long closing the window waits for the sessions to end.
@@ -519,33 +523,35 @@ fn resize_handles(tiling: Tiling) -> impl IntoElement {
     .size_full()
 }
 
-/// The edge of the window position is on, in the room around it. Corners reach a little further,
-/// to be easier to grab.
+/// The edge of the window position is on: in the room around it, or just inside its border.
+/// Corners reach further, to be easier to grab; sides against a screen edge or another window
+/// don't resize.
 fn resize_edge(position: Point<Pixels>, size: Size<Pixels>, tiling: Tiling) -> Option<ResizeEdge> {
-    let near = |v: Pixels, max: Pixels, reach: Pixels| (v < reach, v > max - reach);
-    let (left, right) = near(position.x, size.width, SHADOW * 1.5);
-    let (top, bottom) = near(position.y, size.height, SHADOW * 1.5);
-    let corner = |vertical: bool, horizontal: bool| vertical && horizontal;
-    if !tiling.top && corner(top, left) {
-        return Some(ResizeEdge::TopLeft);
-    }
-    if !tiling.top && corner(top, right) {
-        return Some(ResizeEdge::TopRight);
-    }
-    if !tiling.bottom && corner(bottom, left) {
-        return Some(ResizeEdge::BottomLeft);
-    }
-    if !tiling.bottom && corner(bottom, right) {
-        return Some(ResizeEdge::BottomRight);
-    }
-    let (left, right) = near(position.x, size.width, SHADOW);
-    let (top, bottom) = near(position.y, size.height, SHADOW);
-    Some(match () {
-        _ if top && !tiling.top => ResizeEdge::Top,
-        _ if bottom && !tiling.bottom => ResizeEdge::Bottom,
-        _ if left && !tiling.left => ResizeEdge::Left,
-        _ if right && !tiling.right => ResizeEdge::Right,
-        _ => return None,
+    let reach = |tiled: bool, corner: bool| match (tiled, corner) {
+        (true, _) => px(0.),
+        (false, false) => SHADOW + RESIZE_INSIDE,
+        (false, true) => SHADOW + RESIZE_INSIDE + RESIZE_CORNER,
+    };
+    let near = |corner| {
+        (
+            position.y < reach(tiling.top, corner),
+            position.y > size.height - reach(tiling.bottom, corner),
+            position.x < reach(tiling.left, corner),
+            position.x > size.width - reach(tiling.right, corner),
+        )
+    };
+    Some(match near(true) {
+        (true, _, true, _) => ResizeEdge::TopLeft,
+        (true, _, _, true) => ResizeEdge::TopRight,
+        (_, true, true, _) => ResizeEdge::BottomLeft,
+        (_, true, _, true) => ResizeEdge::BottomRight,
+        _ => match near(false) {
+            (true, ..) => ResizeEdge::Top,
+            (_, true, ..) => ResizeEdge::Bottom,
+            (_, _, true, _) => ResizeEdge::Left,
+            (_, _, _, true) => ResizeEdge::Right,
+            _ => return None,
+        },
     })
 }
 
