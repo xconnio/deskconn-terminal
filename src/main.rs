@@ -15,7 +15,7 @@ use gpui::{
     size,
 };
 
-use crate::terminal_view::Paste;
+use crate::terminal_view::{DecreaseFontSize, IncreaseFontSize, Paste, ResetFontSize};
 use crate::workspace::{CloseTab, NewTab, NextTab, PreviousTab, Workspace};
 
 /// The runtime the sessions' connections run on.
@@ -67,6 +67,10 @@ fn bind_keys(cx: &mut App) {
             KeyBinding::new("cmd-shift-]", NextTab, None),
             KeyBinding::new("cmd-shift-[", PreviousTab, None),
             KeyBinding::new("cmd-v", Paste, Some("Terminal")),
+            KeyBinding::new("cmd-=", IncreaseFontSize, Some("Terminal")),
+            KeyBinding::new("cmd-+", IncreaseFontSize, Some("Terminal")),
+            KeyBinding::new("cmd--", DecreaseFontSize, Some("Terminal")),
+            KeyBinding::new("cmd-0", ResetFontSize, Some("Terminal")),
         ]);
     } else {
         cx.bind_keys([
@@ -78,6 +82,10 @@ fn bind_keys(cx: &mut App) {
             KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
             KeyBinding::new("ctrl-shift-v", Paste, Some("Terminal")),
             KeyBinding::new("shift-insert", Paste, Some("Terminal")),
+            KeyBinding::new("ctrl-=", IncreaseFontSize, Some("Terminal")),
+            KeyBinding::new("ctrl-+", IncreaseFontSize, Some("Terminal")),
+            KeyBinding::new("ctrl--", DecreaseFontSize, Some("Terminal")),
+            KeyBinding::new("ctrl-0", ResetFontSize, Some("Terminal")),
         ]);
     }
 }
