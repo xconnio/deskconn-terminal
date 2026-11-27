@@ -20,7 +20,7 @@ use gpui::{
 };
 
 use crate::terminal_view::{Clear, Copy, DecreaseFontSize, IncreaseFontSize, Paste, Reset, ResetFontSize};
-use crate::workspace::{ActivateTab, CloseTab, NewTab, NewTabOn, NextTab, PreviousTab, Workspace};
+use crate::workspace::{ActivateTab, CloseTab, NewTab, NewTabOn, NextTab, PreviousTab, Quit, Workspace};
 
 /// The runtime the sessions' connections run on.
 pub fn runtime() -> &'static tokio::runtime::Runtime {
@@ -72,6 +72,7 @@ fn bind_keys(cx: &mut App) {
         cx.bind_keys([
             KeyBinding::new("cmd-t", NewTab, None),
             KeyBinding::new("cmd-shift-k", NewTabOn, None),
+            KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-w", CloseTab, None),
             KeyBinding::new("cmd-shift-]", NextTab, None),
             KeyBinding::new("cmd-shift-[", PreviousTab, None),
@@ -88,6 +89,8 @@ fn bind_keys(cx: &mut App) {
         cx.bind_keys([
             KeyBinding::new("ctrl-shift-t", NewTab, None),
             KeyBinding::new("ctrl-shift-k", NewTabOn, None),
+            // Only once the last tab is closed, as programs in a terminal may take Ctrl+Q.
+            KeyBinding::new("ctrl-q", Quit, Some("Home")),
             KeyBinding::new("ctrl-shift-w", CloseTab, None),
             KeyBinding::new("ctrl-pagedown", NextTab, None),
             KeyBinding::new("ctrl-pageup", PreviousTab, None),

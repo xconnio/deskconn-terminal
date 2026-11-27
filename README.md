@@ -37,6 +37,7 @@ make release  # optimized build in target/release/
 | Ctrl+Shift+T                 | Cmd+T         | New tab            |
 | Ctrl+Shift+K                 | Cmd+Shift+K   | New tab on…        |
 | Ctrl+Shift+W                 | Cmd+W         | Close tab          |
+| Ctrl+Q, with no tabs open    | Cmd+Q         | Quit               |
 | Ctrl+Tab, Ctrl+Page Down     | Cmd+Shift+]   | Next tab           |
 | Ctrl+Shift+Tab, Ctrl+Page Up | Cmd+Shift+[   | Previous tab       |
 | Alt+1 … Alt+9, Alt+0         | Cmd+1 … Cmd+9 | Tab 1 to 9, tab 10 |

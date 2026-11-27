@@ -14,7 +14,7 @@ use crate::palette::{MachinePalette, Picked};
 use crate::terminal_view::{Closed, TerminalView};
 use crate::theme;
 
-actions!(workspace, [NewTab, NewTabOn, CloseTab, NextTab, PreviousTab]);
+actions!(workspace, [NewTab, NewTabOn, CloseTab, NextTab, PreviousTab, Quit]);
 
 /// Switches to the tab at an index, counted from 0.
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
@@ -71,8 +71,9 @@ impl Workspace {
             Err(err) => workspace.error = Some(format!("{err:#}")),
         }
         // This machine, as the CLI's `desk shell` would open.
-        if let Some(machine) = workspace.machines.first().cloned() {
-            workspace.open(machine, window, cx);
+        match workspace.machines.first().cloned() {
+            Some(machine) => workspace.open(machine, window, cx),
+            None => workspace.focus.focus(window, cx),
         }
         cx.on_release(Self::end_sessions).detach();
         workspace
@@ -368,9 +369,15 @@ impl Workspace {
     }
 
     /// What the window shows without tabs: the machines to open one on, or why there are none.
+    /// Closes the window, ending its sessions, and so quits the app.
+    fn quit(&mut self, _: &Quit, window: &mut Window, _cx: &mut Context<Self>) {
+        window.remove_window();
+    }
+
     fn render_machines(&self, cx: &mut Context<Self>) -> AnyElement {
         let page = div()
             .track_focus(&self.focus)
+            .key_context("Home")
             .flex()
             .flex_col()
             .flex_1()
@@ -427,6 +434,7 @@ impl Render for Workspace {
             .key_context("Workspace")
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::new_tab_on))
+            .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
