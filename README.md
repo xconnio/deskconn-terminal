@@ -35,6 +35,7 @@ make release  # optimized build in target/release/
 | Linux and Windows            | macOS         | Action             |
 |------------------------------|---------------|--------------------|
 | Ctrl+Shift+T                 | Cmd+T         | New tab            |
+| Ctrl+Shift+K                 | Cmd+Shift+K   | New tab on…        |
 | Ctrl+Shift+W                 | Cmd+W         | Close tab          |
 | Ctrl+Tab, Ctrl+Page Down     | Cmd+Shift+]   | Next tab           |
 | Ctrl+Shift+Tab, Ctrl+Page Up | Cmd+Shift+[   | Previous tab       |
@@ -53,7 +54,8 @@ macOS) opens a link. A right click opens a menu to copy, paste, clear, or reset.
 Clear forgets the scrollback and brings the prompt to the top; Reset puts the terminal back as it
 started, for when a program has left it in a bad state.
 
-`+` opens a tab on the machine of the current one; `▾` picks another machine.
+`+` opens a tab on the machine of the current one; `▾` picks another machine, as does
+Ctrl+Shift+K, by typing part of its name.
 
 ## Notes
 

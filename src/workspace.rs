@@ -10,10 +10,11 @@ use gpui::{
 };
 
 use crate::daemon::{self, Machine};
+use crate::palette::{MachinePalette, Picked};
 use crate::terminal_view::{Closed, TerminalView};
 use crate::theme;
 
-actions!(workspace, [NewTab, CloseTab, NextTab, PreviousTab]);
+actions!(workspace, [NewTab, NewTabOn, CloseTab, NextTab, PreviousTab]);
 
 /// Switches to the tab at an index, counted from 0.
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
@@ -40,6 +41,8 @@ pub struct Workspace {
     active: usize,
     /// Whether the menu of machines to open a tab on is open.
     menu: bool,
+    /// The palette to pick a machine for a new tab by name, while it's open.
+    palette: Option<Entity<MachinePalette>>,
     /// Why the machines couldn't be listed.
     error: Option<String>,
     focus: FocusHandle,
@@ -55,6 +58,7 @@ impl Workspace {
             tabs: Vec::new(),
             active: 0,
             menu: false,
+            palette: None,
             error: None,
             focus: cx.focus_handle(),
             dragging: false,
@@ -134,6 +138,26 @@ impl Workspace {
         if let Some(machine) = self.current_machine(cx) {
             self.open(machine, window, cx);
         }
+    }
+
+    /// Opens the palette to pick the machine for a new tab, with the machines as they are now.
+    fn new_tab_on(&mut self, _: &NewTabOn, window: &mut Window, cx: &mut Context<Self>) {
+        if let Ok(machines) = daemon::machines(&self.dir) {
+            self.machines = machines;
+        }
+        let palette = cx.new(|cx| MachinePalette::new(self.machines.clone(), cx));
+        cx.subscribe_in(&palette, window, |this, _, picked: &Picked, window, cx| {
+            this.palette = None;
+            match picked {
+                Picked::Machine(machine) => this.open(machine.clone(), window, cx),
+                Picked::Dismissed => this.activate(this.active, window, cx),
+            }
+        })
+        .detach();
+        palette.read(cx).focus_handle(cx).focus(window, cx);
+        self.menu = false;
+        self.palette = Some(palette);
+        cx.notify();
     }
 
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -402,6 +426,7 @@ impl Render for Workspace {
             .id("workspace")
             .key_context("Workspace")
             .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::new_tab_on))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
@@ -411,8 +436,22 @@ impl Render for Workspace {
             .size_full()
             .bg(theme::background())
             .font_family(".SystemUIFont")
+            .relative()
             .child(self.render_titlebar(tiling, window, cx))
-            .child(body);
+            .child(body)
+            .when_some(self.palette.clone(), |content, palette| {
+                content.child(
+                    div()
+                        .absolute()
+                        .top(TITLEBAR_HEIGHT + px(12.))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .px_4()
+                        .child(palette),
+                )
+            });
         let Some(tiling) = tiling else {
             return content.into_any_element();
         };

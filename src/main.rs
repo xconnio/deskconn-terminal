@@ -3,6 +3,7 @@
 mod daemon;
 mod keys;
 mod links;
+mod palette;
 mod protocol;
 mod selection;
 mod session;
@@ -19,7 +20,7 @@ use gpui::{
 };
 
 use crate::terminal_view::{Clear, Copy, DecreaseFontSize, IncreaseFontSize, Paste, Reset, ResetFontSize};
-use crate::workspace::{ActivateTab, CloseTab, NewTab, NextTab, PreviousTab, Workspace};
+use crate::workspace::{ActivateTab, CloseTab, NewTab, NewTabOn, NextTab, PreviousTab, Workspace};
 
 /// The runtime the sessions' connections run on.
 pub fn runtime() -> &'static tokio::runtime::Runtime {
@@ -70,6 +71,7 @@ fn bind_keys(cx: &mut App) {
     if cfg!(target_os = "macos") {
         cx.bind_keys([
             KeyBinding::new("cmd-t", NewTab, None),
+            KeyBinding::new("cmd-shift-k", NewTabOn, None),
             KeyBinding::new("cmd-w", CloseTab, None),
             KeyBinding::new("cmd-shift-]", NextTab, None),
             KeyBinding::new("cmd-shift-[", PreviousTab, None),
@@ -85,6 +87,7 @@ fn bind_keys(cx: &mut App) {
     } else {
         cx.bind_keys([
             KeyBinding::new("ctrl-shift-t", NewTab, None),
+            KeyBinding::new("ctrl-shift-k", NewTabOn, None),
             KeyBinding::new("ctrl-shift-w", CloseTab, None),
             KeyBinding::new("ctrl-pagedown", NextTab, None),
             KeyBinding::new("ctrl-pageup", PreviousTab, None),
