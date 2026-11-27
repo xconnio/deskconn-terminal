@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, BoxShadow, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable, Hitbox,
-    HitboxBehavior, MouseButton, MouseDownEvent, Pixels, Point, ResizeEdge, SharedString, Size, Tiling, Window,
-    WindowControlArea, actions, anchored, canvas, deferred, div, hsla, point, prelude::*, px,
+    AnyElement, App, Bounds, BoxShadow, Context, CursorStyle, Decorations, Entity, FocusHandle, Focusable,
+    HitboxBehavior, MouseButton, MouseDownEvent, Pixels, ResizeEdge, SharedString, Tiling, Window, WindowControlArea,
+    actions, anchored, canvas, deferred, div, hsla, point, prelude::*, px,
 };
 
 use crate::daemon::{self, Machine};
@@ -500,20 +500,59 @@ fn window_controls(window: &Window) -> impl IntoElement {
         )
 }
 
-/// Lets a window that draws its own decorations be resized from the room around it.
+/// Lets a window that draws its own decorations be resized from its edges: from the room around
+/// it, or just inside its border. Each edge and corner has a hitbox of its own, so that the
+/// pointer takes the right shape wherever it goes. Corners reach further, to be easier to grab,
+/// and sides against a screen edge or another window don't resize.
 fn resize_handles(tiling: Tiling) -> impl IntoElement {
     canvas(
-        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-        move |_, hitbox: Hitbox, window, _| {
-            if let Some(edge) = resize_edge(window.mouse_position(), window.viewport_size(), tiling) {
-                window.set_cursor_style(resize_cursor(edge), &hitbox);
+        move |_, window, _| {
+            let size = window.viewport_size();
+            let side = SHADOW + RESIZE_INSIDE;
+            let corner = side + RESIZE_CORNER;
+            let (w, h) = (size.width, size.height);
+            let area = |x, y, width, height| Bounds::new(point(x, y), gpui::size(width, height));
+            let mut areas = Vec::new();
+            if !tiling.top {
+                areas.push((ResizeEdge::Top, area(px(0.), px(0.), w, side)));
+            }
+            if !tiling.bottom {
+                areas.push((ResizeEdge::Bottom, area(px(0.), h - side, w, side)));
+            }
+            if !tiling.left {
+                areas.push((ResizeEdge::Left, area(px(0.), px(0.), side, h)));
+            }
+            if !tiling.right {
+                areas.push((ResizeEdge::Right, area(w - side, px(0.), side, h)));
+            }
+            // Last, so that they're over the sides.
+            if !tiling.top && !tiling.left {
+                areas.push((ResizeEdge::TopLeft, area(px(0.), px(0.), corner, corner)));
+            }
+            if !tiling.top && !tiling.right {
+                areas.push((ResizeEdge::TopRight, area(w - corner, px(0.), corner, corner)));
+            }
+            if !tiling.bottom && !tiling.left {
+                areas.push((ResizeEdge::BottomLeft, area(px(0.), h - corner, corner, corner)));
+            }
+            if !tiling.bottom && !tiling.right {
+                areas.push((ResizeEdge::BottomRight, area(w - corner, h - corner, corner, corner)));
+            }
+            areas
+                .into_iter()
+                .map(|(edge, bounds)| (edge, window.insert_hitbox(bounds, HitboxBehavior::BlockMouse)))
+                .collect::<Vec<_>>()
+        },
+        |_, handles, window, _| {
+            for (edge, hitbox) in &handles {
+                window.set_cursor_style(resize_cursor(*edge), hitbox);
             }
             window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                 if !phase.bubble() || event.button != MouseButton::Left {
                     return;
                 }
-                if let Some(edge) = resize_edge(event.position, window.viewport_size(), tiling) {
-                    window.start_window_resize(edge);
+                if let Some((edge, _)) = handles.iter().rev().find(|(_, hitbox)| hitbox.is_hovered(window)) {
+                    window.start_window_resize(*edge);
                     cx.stop_propagation();
                 }
             });
@@ -521,38 +560,6 @@ fn resize_handles(tiling: Tiling) -> impl IntoElement {
     )
     .absolute()
     .size_full()
-}
-
-/// The edge of the window position is on: in the room around it, or just inside its border.
-/// Corners reach further, to be easier to grab; sides against a screen edge or another window
-/// don't resize.
-fn resize_edge(position: Point<Pixels>, size: Size<Pixels>, tiling: Tiling) -> Option<ResizeEdge> {
-    let reach = |tiled: bool, corner: bool| match (tiled, corner) {
-        (true, _) => px(0.),
-        (false, false) => SHADOW + RESIZE_INSIDE,
-        (false, true) => SHADOW + RESIZE_INSIDE + RESIZE_CORNER,
-    };
-    let near = |corner| {
-        (
-            position.y < reach(tiling.top, corner),
-            position.y > size.height - reach(tiling.bottom, corner),
-            position.x < reach(tiling.left, corner),
-            position.x > size.width - reach(tiling.right, corner),
-        )
-    };
-    Some(match near(true) {
-        (true, _, true, _) => ResizeEdge::TopLeft,
-        (true, _, _, true) => ResizeEdge::TopRight,
-        (_, true, true, _) => ResizeEdge::BottomLeft,
-        (_, true, _, true) => ResizeEdge::BottomRight,
-        _ => match near(false) {
-            (true, ..) => ResizeEdge::Top,
-            (_, true, ..) => ResizeEdge::Bottom,
-            (_, _, true, _) => ResizeEdge::Left,
-            (_, _, _, true) => ResizeEdge::Right,
-            _ => return None,
-        },
-    })
 }
 
 fn resize_cursor(edge: ResizeEdge) -> CursorStyle {
