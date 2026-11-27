@@ -50,3 +50,6 @@ make release  # optimized build in target/release/
 GPUI comes from Zed's repository, at a release tag. Its `zed-async-tar` needs `xattr` 0.2,
 which no longer builds with current `libc`; `vendor/xattr` is that crate with the one-line fix,
 used through `[patch.crates-io]` until GPUI moves on.
+
+The terminal's font, [JetBrains Mono](https://www.jetbrains.com/lp/mono/), is built into the
+app from `assets/fonts`, under the SIL Open Font License (`assets/fonts/OFL.txt`).

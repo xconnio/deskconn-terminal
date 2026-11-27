@@ -32,6 +32,9 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
 
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
+        cx.text_system()
+            .add_fonts(terminal_view::fonts())
+            .expect("load the terminal's font");
         bind_keys(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
