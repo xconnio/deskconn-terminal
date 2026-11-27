@@ -278,6 +278,8 @@ impl Workspace {
             )
             .child(
                 button("machines", "▾")
+                    // The glyph is drawn small for its size.
+                    .text_size(px(24.))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.menu = !this.menu;
                         cx.notify();
@@ -512,8 +514,9 @@ fn button(id: impl Into<gpui::ElementId>, label: &'static str) -> gpui::Stateful
         .items_center()
         .justify_center()
         .flex_none()
-        .size(px(24.))
+        .size(px(28.))
         .rounded_md()
+        .text_size(px(18.))
         .text_color(theme::muted())
         .hover(|button| button.bg(theme::tab_hover()).text_color(theme::foreground()))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
