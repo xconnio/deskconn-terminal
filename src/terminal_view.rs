@@ -49,8 +49,9 @@ const RESIZE_DELAY: Duration = Duration::from_millis(100);
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// How long the cursor blinks after the last key, as GNOME has it, before it stays shown.
 const BLINK_TIMEOUT: Duration = Duration::from_secs(10);
-/// The room around the terminal's text.
+/// The room around the terminal's text, and above it.
 const PADDING: Pixels = px(8.);
+const PADDING_TOP: Pixels = px(4.);
 /// The scrollbar's width, within the terminal's right padding, and its thumb's least height.
 const SCROLLBAR_WIDTH: Pixels = px(6.);
 const SCROLLBAR_MIN_THUMB: Pixels = px(48.);
@@ -750,8 +751,12 @@ impl TerminalView {
             .min(track_height);
         let top = track.top() + px((track_height - height) * bar.offset as f32 / rows as f32);
         Some(Scrollbar {
-            // All of the padding, to the window's edge when it's maximized.
-            target: Bounds::new(point(bounds.right(), track.top()), size(PADDING, track.size.height)),
+            // All of the padding beside the grid, from top to bottom, so that the thumb can be
+            // grabbed at the very edge and corner of the screen when the window is maximized.
+            target: Bounds::from_corners(
+                point(bounds.right(), bounds.top() - PADDING_TOP),
+                point(bounds.right() + PADDING, bounds.bottom()),
+            ),
             track,
             thumb: Bounds::new(point(track.left(), top), size(SCROLLBAR_WIDTH, px(height))),
             rows,
@@ -878,7 +883,7 @@ impl Render for TerminalView {
             )
             .size_full()
             .px(PADDING)
-            .pt_1()
+            .pt(PADDING_TOP)
             .child(
                 canvas(
                     move |bounds, window, cx| {

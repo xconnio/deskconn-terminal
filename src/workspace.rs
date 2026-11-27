@@ -15,6 +15,11 @@ use crate::theme;
 
 actions!(workspace, [NewTab, CloseTab, NextTab, PreviousTab]);
 
+/// Switches to the tab at an index, counted from 0.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct ActivateTab(pub usize);
+
 const TITLEBAR_HEIGHT: Pixels = px(38.);
 /// The room around a window that draws its own decorations, for its shadow and its resize
 /// handles.
@@ -138,6 +143,12 @@ impl Workspace {
     fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
         if !self.tabs.is_empty() {
             self.activate((self.active + 1) % self.tabs.len(), window, cx);
+        }
+    }
+
+    fn activate_tab(&mut self, tab: &ActivateTab, window: &mut Window, cx: &mut Context<Self>) {
+        if tab.0 < self.tabs.len() {
+            self.activate(tab.0, window, cx);
         }
     }
 
@@ -392,6 +403,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(Self::activate_tab))
             .flex()
             .flex_col()
             .size_full()
