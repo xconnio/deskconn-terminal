@@ -66,3 +66,8 @@ used through `[patch.crates-io]` until GPUI moves on.
 
 The terminal's font, [JetBrains Mono](https://www.jetbrains.com/lp/mono/), is built into the
 app from `assets/fonts`, under the SIL Open Font License (`assets/fonts/OFL.txt`).
+
+On Linux, the app adds itself to the desktop as it starts: an entry in
+`~/.local/share/applications` and its icon in `~/.local/share/icons`, named after its app ID,
+`io.xconn.deskconn.terminal`. That's how the desktop shows the window's icon, and the entry starts
+the executable wherever it was last run from.
