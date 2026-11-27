@@ -41,13 +41,17 @@ make release  # optimized build in target/release/
 | Alt+1 … Alt+9, Alt+0         | Cmd+1 … Cmd+9 | Tab 1 to 9, tab 10 |
 | Ctrl+Shift+C, Ctrl+Insert    | Cmd+C         | Copy               |
 | Ctrl+Shift+V, Shift+Insert   | Cmd+V         | Paste              |
-|                              | Cmd+K         | Clear scrollback   |
+| Ctrl+Shift+L                 | Cmd+K         | Clear              |
+| Ctrl+Shift+Alt+L             | Cmd+Alt+K     | Reset              |
 | Ctrl+=                       | Cmd+=         | Larger font        |
 | Ctrl+-                       | Cmd+-         | Smaller font       |
 | Ctrl+0                       | Cmd+0         | Default font size  |
 
 Selecting text with the mouse offers it to a middle click on Linux, and Ctrl+click (Cmd+click on
-macOS) opens a link. A right click opens a menu to copy, paste, or clear the scrollback.
+macOS) opens a link. A right click opens a menu to copy, paste, clear, or reset.
+
+Clear forgets the scrollback and brings the prompt to the top; Reset puts the terminal back as it
+started, for when a program has left it in a bad state.
 
 `+` opens a tab on the machine of the current one; `▾` picks another machine.
 
