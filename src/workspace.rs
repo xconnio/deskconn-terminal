@@ -285,7 +285,7 @@ impl Workspace {
             )
             // Room to drag the window by, however many tabs there are.
             .child(div().flex_1().min_w(px(48.)))
-            .when(!mac, |bar| bar.child(window_controls(window)))
+            .when(!mac, |bar| bar.child(window_controls(tiling, window)))
     }
 
     fn render_tab(&self, index: usize, label: SharedString, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -514,7 +514,10 @@ fn button(id: impl Into<gpui::ElementId>, label: &'static str) -> gpui::Stateful
 }
 
 /// Minimize, maximize and close, for platforms that leave drawing them to the app.
-fn window_controls(window: &Window) -> impl IntoElement {
+/// The buttons to minimize, maximize and close the window. The close button, in the corner, is
+/// rounded with the window.
+fn window_controls(tiling: Option<Tiling>, window: &Window) -> impl IntoElement {
+    let corner = tiling.is_some_and(|tiling| !tiling.top && !tiling.right);
     let control = |id: &'static str, label: &'static str, area| {
         div()
             .id(id)
@@ -550,6 +553,7 @@ fn window_controls(window: &Window) -> impl IntoElement {
         )
         .child(
             control("close", "✕", WindowControlArea::Close)
+                .when(corner, |c| c.rounded_tr(ROUNDING))
                 .hover(|c| c.bg(theme::close_hover()).text_color(theme::foreground()))
                 .on_click(|_, window, _| window.remove_window()),
         )
