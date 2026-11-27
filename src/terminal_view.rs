@@ -35,7 +35,8 @@ actions!(
     [
         Copy,
         Paste,
-        ClearScrollback,
+        Clear,
+        Reset,
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize
@@ -311,10 +312,29 @@ impl TerminalView {
         }
     }
 
-    /// Forgets the lines scrolled off the top.
-    fn clear_scrollback(&mut self, _: &ClearScrollback, _window: &mut Window, cx: &mut Context<Self>) {
-        self.term.vt_write(b"\x1b[3J");
+    /// Forgets the scrollback, and brings the cursor's line, usually the prompt, to the top. A
+    /// full-screen program keeps its screen.
+    fn clear(&mut self, _: &Clear, _window: &mut Window, cx: &mut Context<Self>) {
         self.term.scroll_viewport(ScrollViewport::Bottom);
+        let alternate = self
+            .term
+            .active_screen()
+            .is_ok_and(|screen| screen == Screen::Alternate);
+        let row = self.term.cursor_y().unwrap_or(0);
+        if !alternate && row > 0 {
+            // Scroll the lines above the cursor away, and follow them up.
+            self.term.vt_write(format!("\x1b[{row}S\x1b[{row}A").as_bytes());
+        }
+        self.term.vt_write(b"\x1b[3J");
+        cx.notify();
+    }
+
+    /// Resets the terminal as if it had just started, and has the program draw itself again on
+    /// it, as Ctrl+L does.
+    fn reset(&mut self, _: &Reset, _window: &mut Window, cx: &mut Context<Self>) {
+        self.term.reset();
+        self.shaped.clear();
+        self.send(b"\x0c".to_vec());
         cx.notify();
     }
 
@@ -353,7 +373,8 @@ impl TerminalView {
         };
         let copy = item("copy", "Copy", shortcut(&Copy), menu.can_copy);
         let paste = item("paste", "Paste", shortcut(&Paste), true);
-        let clear = item("clear-scrollback", "Clear Scrollback", shortcut(&ClearScrollback), true);
+        let clear = item("clear", "Clear", shortcut(&Clear), true);
+        let reset = item("reset", "Reset", shortcut(&Reset), true);
         deferred(
             anchored()
                 .position(menu.position)
@@ -386,7 +407,11 @@ impl TerminalView {
                         .child(div().my_1().h(px(1.)).bg(theme::border()))
                         .child(clear.on_click(cx.listener(|view, _, window, cx| {
                             view.menu = None;
-                            view.clear_scrollback(&ClearScrollback, window, cx);
+                            view.clear(&Clear, window, cx);
+                        })))
+                        .child(reset.on_click(cx.listener(|view, _, window, cx| {
+                            view.menu = None;
+                            view.reset(&Reset, window, cx);
                         }))),
                 ),
         )
@@ -869,7 +894,8 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
-            .on_action(cx.listener(Self::clear_scrollback))
+            .on_action(cx.listener(Self::clear))
+            .on_action(cx.listener(Self::reset))
             .on_modifiers_changed(cx.listener(|view, event: &ModifiersChangedEvent, window, cx| {
                 view.hover(window.mouse_position(), event.modifiers, cx)
             }))

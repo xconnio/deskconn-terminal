@@ -18,7 +18,7 @@ use gpui::{
     size,
 };
 
-use crate::terminal_view::{ClearScrollback, Copy, DecreaseFontSize, IncreaseFontSize, Paste, ResetFontSize};
+use crate::terminal_view::{Clear, Copy, DecreaseFontSize, IncreaseFontSize, Paste, Reset, ResetFontSize};
 use crate::workspace::{ActivateTab, CloseTab, NewTab, NextTab, PreviousTab, Workspace};
 
 /// The runtime the sessions' connections run on.
@@ -74,7 +74,8 @@ fn bind_keys(cx: &mut App) {
             KeyBinding::new("cmd-shift-]", NextTab, None),
             KeyBinding::new("cmd-shift-[", PreviousTab, None),
             KeyBinding::new("cmd-c", Copy, Some("Terminal")),
-            KeyBinding::new("cmd-k", ClearScrollback, Some("Terminal")),
+            KeyBinding::new("cmd-k", Clear, Some("Terminal")),
+            KeyBinding::new("cmd-alt-k", Reset, Some("Terminal")),
             KeyBinding::new("cmd-v", Paste, Some("Terminal")),
             KeyBinding::new("cmd-=", IncreaseFontSize, Some("Terminal")),
             KeyBinding::new("cmd-+", IncreaseFontSize, Some("Terminal")),
@@ -94,6 +95,8 @@ fn bind_keys(cx: &mut App) {
             KeyBinding::new("shift-insert", Paste, Some("Terminal")),
             KeyBinding::new("ctrl-shift-c", Copy, Some("Terminal")),
             KeyBinding::new("ctrl-shift-v", Paste, Some("Terminal")),
+            KeyBinding::new("ctrl-shift-l", Clear, Some("Terminal")),
+            KeyBinding::new("ctrl-shift-alt-l", Reset, Some("Terminal")),
             KeyBinding::new("ctrl-=", IncreaseFontSize, Some("Terminal")),
             KeyBinding::new("ctrl-+", IncreaseFontSize, Some("Terminal")),
             KeyBinding::new("ctrl--", DecreaseFontSize, Some("Terminal")),
