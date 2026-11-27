@@ -1,10 +1,11 @@
 //! A tab's terminal: the session's output taken in by libghostty-vt and drawn from its
 //! render state, and the user's keys sent to it.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ghostty_vt::Terminal;
 use ghostty_vt::render::{
@@ -14,9 +15,10 @@ use ghostty_vt::screen::{CellWide, Screen};
 use ghostty_vt::style::{StyleColor, Underline};
 use ghostty_vt::terminal::{Event as TermEvent, Mode, Options, ScrollViewport};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, Global,
-    Hsla, KeyDownEvent, MouseButton, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, Size, StrikethroughStyle,
-    Task, TextAlign, TextRun, UnderlineStyle, Window, actions, canvas, div, fill, outline, point, prelude::*, px, size,
+    App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight,
+    Global, Hitbox, HitboxBehavior, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, Size, StrikethroughStyle, Task, TextAlign, TextRun,
+    UnderlineStyle, Window, actions, canvas, div, fill, hsla, outline, point, prelude::*, px, size,
 };
 use tokio::sync::mpsc;
 
@@ -33,6 +35,13 @@ const FONT_SIZES: (f32, f32) = (8., 40.);
 const LINE_HEIGHT: f32 = 1.3;
 /// How long the terminal's size has to stay the same before the shell is told of it.
 const RESIZE_DELAY: Duration = Duration::from_millis(100);
+/// How long a blinking cursor stays shown, and then hidden.
+const BLINK_INTERVAL: Duration = Duration::from_millis(530);
+/// How long the cursor blinks after the last key, as GNOME has it, before it stays shown.
+const BLINK_TIMEOUT: Duration = Duration::from_secs(10);
+/// The scrollbar's width, within the terminal's right padding, and its thumb's least height.
+const SCROLLBAR_WIDTH: Pixels = px(6.);
+const SCROLLBAR_MIN_THUMB: Pixels = px(24.);
 
 /// The terminals' font size, as the user set it.
 struct FontSize(Pixels);
@@ -76,6 +85,12 @@ pub struct TerminalView {
     resize: Option<Task<()>>,
     /// Scrolling not yet a whole line.
     scroll: Pixels,
+    /// Whether the cursor blinks, as programs can set, and whether it's shown just now.
+    cursor_blinks: bool,
+    blink_on: bool,
+    blink: Task<()>,
+    /// Where the scrollbar's thumb was grabbed, from its top, while it's being dragged.
+    scrollbar_drag: Option<(Pixels, Scrollbar)>,
 }
 
 impl EventEmitter<Closed> for TerminalView {}
@@ -88,7 +103,12 @@ impl Focusable for TerminalView {
 
 impl TerminalView {
     /// Starts a new session on machine, through the daemon of dir.
-    pub fn new(machine: Machine, dir: PathBuf, cx: &mut Context<Self>) -> ghostty_vt::error::Result<Self> {
+    pub fn new(
+        machine: Machine,
+        dir: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ghostty_vt::error::Result<Self> {
         let (cols, rows) = (80, 24);
         let mut term = Terminal::new(Options {
             cols,
@@ -101,6 +121,7 @@ impl TerminalView {
             .set_default_bg_color(Some(bg))?
             .set_default_color_palette(Some(palette))?;
         term.set_size_reports(true);
+        term.set_default_cursor_blink(Some(true))?;
 
         let (commands, rx) = mpsc::unbounded_channel();
         let (tx, mut events) = mpsc::unbounded_channel();
@@ -119,6 +140,9 @@ impl TerminalView {
         })
         .detach();
 
+        let focus = cx.focus_handle();
+        cx.on_focus(&focus, window, Self::restart_blink).detach();
+
         Ok(Self {
             machine,
             term,
@@ -128,14 +152,42 @@ impl TerminalView {
             keys: KeyEncoder::new()?,
             commands,
             session: Some(session),
-            focus: cx.focus_handle(),
+            focus,
             title: None,
             cell: None,
             font_size: DEFAULT_FONT_SIZE,
             shaped: HashMap::new(),
             resize: None,
             scroll: px(0.),
+            cursor_blinks: false,
+            blink_on: true,
+            blink: Task::ready(()),
+            scrollbar_drag: None,
         })
+    }
+
+    /// Shows the cursor, to blink for a while from now on, while the terminal has focus.
+    fn restart_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.blink_on = true;
+        cx.notify();
+        let started = Instant::now();
+        self.blink = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(BLINK_INTERVAL).await;
+                let done = started.elapsed() >= BLINK_TIMEOUT;
+                let blinking = this.update_in(cx, |view, window, cx| {
+                    let blinking = !done && view.focus.is_focused(window);
+                    view.blink_on = !view.blink_on || !blinking;
+                    if view.cursor_blinks {
+                        cx.notify();
+                    }
+                    blinking
+                });
+                if !matches!(blinking, Ok(true)) {
+                    break;
+                }
+            }
+        });
     }
 
     /// Ends the session, and the shell with it, returning its task to wait for.
@@ -193,9 +245,10 @@ impl TerminalView {
         let _ = self.commands.send(Command::Input(data));
     }
 
-    fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let bytes = self.keys.encode(&event.keystroke, &self.term);
         if !bytes.is_empty() {
+            self.restart_blink(window, cx);
             self.term.scroll_viewport(ScrollViewport::Bottom);
             self.send(bytes);
             cx.stop_propagation();
@@ -203,7 +256,7 @@ impl TerminalView {
         }
     }
 
-    fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
@@ -215,6 +268,7 @@ impl TerminalView {
             return;
         };
         encoded.truncate(n);
+        self.restart_blink(window, cx);
         self.term.scroll_viewport(ScrollViewport::Bottom);
         self.send(encoded);
         cx.notify();
@@ -250,6 +304,34 @@ impl TerminalView {
         }
     }
 
+    /// Starts dragging the scrollbar's thumb from y: where it's grabbed, or from its middle,
+    /// moved there, when the track is clicked.
+    fn grab_scrollbar(&mut self, bar: Scrollbar, y: Pixels, cx: &mut Context<Self>) {
+        let grab = if bar.thumb.top() <= y && y <= bar.thumb.bottom() {
+            y - bar.thumb.top()
+        } else {
+            bar.thumb.size.height / 2.
+        };
+        self.scrollbar_drag = Some((grab, bar));
+        self.drag_scrollbar(y, cx);
+    }
+
+    /// Scrolls to where the thumb, dragged to y, is on the track.
+    fn drag_scrollbar(&mut self, y: Pixels, cx: &mut Context<Self>) {
+        let Some((grab, bar)) = self.scrollbar_drag else {
+            return;
+        };
+        let room = bar.track.size.height - bar.thumb.size.height;
+        let fraction = if room > px(0.) {
+            ((y - grab - bar.track.top()) / room).clamp(0., 1.)
+        } else {
+            1.
+        };
+        let row = (fraction * bar.rows as f32).round() as usize;
+        self.term.scroll_viewport(ScrollViewport::Row(row));
+        cx.notify();
+    }
+
     /// Sizes the terminal to fit bounds, with cells of cell. The shell hears of a new size once it
     /// has settled, so that dragging the window's edge doesn't make it redraw at every step.
     fn fit(&mut self, bounds: Bounds<Pixels>, font_size: Pixels, cell: Size<Pixels>, cx: &mut Context<Self>) {
@@ -280,19 +362,25 @@ impl TerminalView {
         focused: bool,
         window: &mut Window,
     ) -> ghostty_vt::error::Result<Layout> {
+        let scrollbar = self.scrollbar(bounds);
         let snapshot = self.render.update(&self.term)?;
         if snapshot.dirty()? == Dirty::Full {
             self.shaped.clear();
         }
         let colors = snapshot.colors()?;
         let cursor = snapshot.cursor()?;
+        self.cursor_blinks = cursor.blinking;
         let at = |row: u16, col: u16| bounds.origin + point(cell.width * f32::from(col), cell.height * f32::from(row));
 
         let mut layout = Layout {
             line_height: cell.height,
             rows: Vec::new(),
             cursor: None,
+            scrollbar,
+            scrollbar_hitbox: None,
         };
+        // A blinking cursor is hidden every other interval, while the terminal has focus.
+        let shown = cursor.visible && (!cursor.blinking || !focused || self.blink_on);
         let mut shaped = HashMap::with_capacity(self.shaped.len());
         let mut rows = self.rows.update(&snapshot)?;
         let mut y = 0;
@@ -311,7 +399,7 @@ impl TerminalView {
             layout.rows.push((at(y, 0), line.clone()));
             shaped.insert(id, line);
 
-            if let Some(position) = cursor.viewport.filter(|position| cursor.visible && position.y == y) {
+            if let Some(position) = cursor.viewport.filter(|position| shown && position.y == y) {
                 let x = if position.at_wide_tail {
                     position.x.saturating_sub(1)
                 } else {
@@ -375,6 +463,30 @@ impl TerminalView {
         self.shaped = shaped;
         snapshot.clean()?;
         Ok(layout)
+    }
+
+    /// The scrollbar, in the padding right of bounds, when there's scrollback to scroll through.
+    fn scrollbar(&self, bounds: Bounds<Pixels>) -> Option<Scrollbar> {
+        let bar = self.term.scrollbar().ok()?;
+        let rows = bar.total.saturating_sub(bar.len);
+        if rows == 0 {
+            return None;
+        }
+        // Kept off the bottom edge, where the window's corner is rounded.
+        let track = Bounds::new(
+            point(bounds.right() + px(1.), bounds.top()),
+            size(SCROLLBAR_WIDTH, bounds.size.height - px(6.)),
+        );
+        let track_height = f32::from(track.size.height);
+        let height = (track_height * bar.len as f32 / bar.total as f32)
+            .max(f32::from(SCROLLBAR_MIN_THUMB))
+            .min(track_height);
+        let top = track.top() + px((track_height - height) * bar.offset as f32 / rows as f32);
+        Some(Scrollbar {
+            track,
+            thumb: Bounds::new(point(track.left(), top), size(SCROLLBAR_WIDTH, px(height))),
+            rows,
+        })
     }
 }
 
@@ -474,6 +586,7 @@ fn shape_row(
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
+        let painted = view.clone();
         let focused = self.focus.is_focused(window);
         div()
             .id("terminal")
@@ -497,14 +610,18 @@ impl Render for TerminalView {
                     move |bounds, window, cx| {
                         let font_size = font_size(cx);
                         let cell = cell_size(font_size, window);
-                        view.update(cx, |view, cx| {
+                        let mut layout = view.update(cx, |view, cx| {
                             view.fit(bounds, font_size, cell, cx);
                             view.layout(bounds, font_size, cell, focused, window).ok()
-                        })
+                        })?;
+                        layout.scrollbar_hitbox = layout
+                            .scrollbar
+                            .map(|bar| window.insert_hitbox(bar.track, HitboxBehavior::BlockMouse));
+                        Some(layout)
                     },
                     move |_bounds, layout, window, cx| {
                         if let Some(layout) = layout {
-                            layout.paint(window, cx);
+                            layout.paint(&painted, window, cx);
                         }
                     },
                 )
@@ -523,15 +640,21 @@ fn cell_size(font_size: Pixels, window: &Window) -> Size<Pixels> {
     size(width, (font_size * LINE_HEIGHT).round())
 }
 
+/// JetBrains Mono, which the app brings along, so that it looks the same everywhere.
+const FONT_FAMILY: &str = "JetBrains Mono";
+
+/// The fonts of the terminal, to register with GPUI's text system.
+pub fn fonts() -> Vec<Cow<'static, [u8]>> {
+    vec![
+        Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf")),
+    ]
+}
+
 fn terminal_font() -> Font {
-    let family = if cfg!(target_os = "macos") {
-        "Menlo"
-    } else if cfg!(target_os = "windows") {
-        "Consolas"
-    } else {
-        "DejaVu Sans Mono"
-    };
-    gpui::font(family)
+    gpui::font(FONT_FAMILY)
 }
 
 /// What's on screen, ready to paint.
@@ -539,6 +662,16 @@ struct Layout {
     line_height: Pixels,
     rows: Vec<(Point<Pixels>, Rc<ShapedRow>)>,
     cursor: Option<Cursor>,
+    scrollbar: Option<Scrollbar>,
+    scrollbar_hitbox: Option<Hitbox>,
+}
+
+/// The scrollbar's track and thumb, and how many rows there are to scroll through.
+#[derive(Clone, Copy)]
+struct Scrollbar {
+    track: Bounds<Pixels>,
+    thumb: Bounds<Pixels>,
+    rows: u64,
 }
 
 /// A row's backgrounds and text, placed from the row's origin.
@@ -554,7 +687,7 @@ struct Cursor {
 }
 
 impl Layout {
-    fn paint(self, window: &mut Window, cx: &mut App) {
+    fn paint(self, view: &Entity<TerminalView>, window: &mut Window, cx: &mut App) {
         let line_height = self.line_height;
         for (origin, row) in &self.rows {
             for (bounds, color) in &row.backgrounds {
@@ -572,6 +705,48 @@ impl Layout {
                 let _ = glyph.paint(origin, line_height, TextAlign::Left, None, window, cx);
             }
         }
+        if let (Some(bar), Some(hitbox)) = (self.scrollbar, self.scrollbar_hitbox) {
+            paint_scrollbar(bar, hitbox, view, window, cx);
+        }
+    }
+}
+
+/// Paints the scrollbar, and lets its thumb be dragged, or the track clicked to scroll there.
+fn paint_scrollbar(bar: Scrollbar, hitbox: Hitbox, view: &Entity<TerminalView>, window: &mut Window, cx: &mut App) {
+    let dragging = view.read(cx).scrollbar_drag.is_some();
+    let opacity = if dragging {
+        0.5
+    } else if hitbox.is_hovered(window) {
+        0.35
+    } else {
+        0.2
+    };
+    window.paint_quad(fill(bar.thumb, hsla(0., 0., 1., opacity)).corner_radii(SCROLLBAR_WIDTH / 2.));
+
+    let grabbed = view.clone();
+    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+        if phase.bubble() && event.button == MouseButton::Left && hitbox.is_hovered(window) {
+            grabbed.update(cx, |view, cx| view.grab_scrollbar(bar, event.position.y, cx));
+            cx.stop_propagation();
+        }
+    });
+    if dragging {
+        // The drag goes on wherever the mouse goes, until it's let go.
+        let dragged = view.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+            if phase.bubble() {
+                dragged.update(cx, |view, cx| view.drag_scrollbar(event.position.y, cx));
+            }
+        });
+        let released = view.clone();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+            if phase.bubble() && event.button == MouseButton::Left {
+                released.update(cx, |view, cx| {
+                    view.scrollbar_drag = None;
+                    cx.notify();
+                });
+            }
+        });
     }
 }
 

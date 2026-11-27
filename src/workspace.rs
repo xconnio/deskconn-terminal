@@ -67,7 +67,7 @@ impl Workspace {
 
     fn open(&mut self, machine: Machine, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.dir.clone();
-        let view = cx.new(|cx| TerminalView::new(machine, dir, cx).expect("libghostty-vt is out of memory"));
+        let view = cx.new(|cx| TerminalView::new(machine, dir, window, cx).expect("libghostty-vt is out of memory"));
         cx.subscribe_in(&view, window, |this, view, _: &Closed, window, cx| {
             this.remove(view, window, cx)
         })
