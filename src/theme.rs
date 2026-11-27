@@ -1,7 +1,7 @@
 //! The app's colors, and the terminal's palette.
 
 use ghostty_vt::style::{Palette, RgbColor};
-use gpui::{Hsla, Rgba, rgb};
+use gpui::{Hsla, Rgba, hsla, rgb};
 
 const BACKGROUND: u32 = 0x1e1e1e;
 const FOREGROUND: u32 = 0xd4d4d4;
@@ -42,6 +42,11 @@ pub fn muted() -> Hsla {
 
 pub fn error() -> Hsla {
     rgb(0xf87171).into()
+}
+
+/// What's selected in the terminal is drawn over with this.
+pub fn selection() -> Hsla {
+    hsla(0.58, 0.6, 0.6, 0.3)
 }
 
 pub fn close_hover() -> Hsla {

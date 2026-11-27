@@ -13,22 +13,27 @@ use ghostty_vt::render::{
 };
 use ghostty_vt::screen::{CellWide, Screen};
 use ghostty_vt::style::{StyleColor, Underline};
-use ghostty_vt::terminal::{Event as TermEvent, Mode, Options, ScrollViewport};
+use ghostty_vt::terminal::{Event as TermEvent, Mode, Options, PointCoordinate, ScrollViewport};
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight,
-    Hitbox, HitboxBehavior, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point, ScrollWheelEvent, ShapedLine, Size, StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle,
-    Window, actions, canvas, div, fill, hsla, outline, point, prelude::*, px, size,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
+    FontWeight, Hitbox, HitboxBehavior, Hsla, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, Size,
+    StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle, Window, actions, canvas, div, fill, hsla, outline,
+    point, prelude::*, px, size,
 };
 use tokio::sync::mpsc;
 
 use crate::daemon::Machine;
 use crate::keys::KeyEncoder;
+use crate::selection::{self, GridPosition, Link, Selector, UNIT};
 use crate::session::{self, Command, Event};
 use crate::settings::Settings;
 use crate::theme;
 
-actions!(terminal, [Paste, IncreaseFontSize, DecreaseFontSize, ResetFontSize]);
+actions!(
+    terminal,
+    [Copy, Paste, IncreaseFontSize, DecreaseFontSize, ResetFontSize]
+);
 
 const LINE_HEIGHT: f32 = 1.3;
 /// How long the terminal's size has to stay the same before the shell is told of it.
@@ -42,6 +47,8 @@ const PADDING: Pixels = px(8.);
 /// The scrollbar's width, within the terminal's right padding, and its thumb's least height.
 const SCROLLBAR_WIDTH: Pixels = px(6.);
 const SCROLLBAR_MIN_THUMB: Pixels = px(24.);
+/// How often a selection dragged past the top or bottom scrolls a row.
+const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(50);
 
 fn font_size(cx: &App) -> Pixels {
     px(Settings::get(cx).font_size)
@@ -85,6 +92,17 @@ pub struct TerminalView {
     blink: Task<()>,
     /// Where the scrollbar's thumb was grabbed, from its top, while it's being dragged.
     scrollbar_drag: Option<(Pixels, Scrollbar)>,
+    selector: Selector,
+    /// Whether the mouse is down, selecting text.
+    selecting: bool,
+    /// Where the mouse last was, for a selection dragged past the top or bottom to go on scrolling.
+    mouse: Point<Pixels>,
+    autoscrolling: bool,
+    autoscroll: Task<()>,
+    /// Where the grid was laid out.
+    grid: Bounds<Pixels>,
+    /// The link under the mouse, while the key to open it is held.
+    link: Option<Link>,
 }
 
 impl EventEmitter<Closed> for TerminalView {}
@@ -157,6 +175,13 @@ impl TerminalView {
             blink_on: true,
             blink: Task::ready(()),
             scrollbar_drag: None,
+            selector: Selector::new()?,
+            selecting: false,
+            mouse: Point::default(),
+            autoscrolling: false,
+            autoscroll: Task::ready(()),
+            grid: Bounds::default(),
+            link: None,
         })
     }
 
@@ -250,10 +275,27 @@ impl TerminalView {
         }
     }
 
+    fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = selection::text(&self.term) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
-        };
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.paste_text(text, window, cx);
+        }
+    }
+
+    /// Pastes what's selected, here or in another app, as a middle click does on Linux.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn paste_primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_primary().and_then(|item| item.text()) {
+            self.paste_text(text, window, cx);
+        }
+    }
+
+    fn paste_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let bracketed = self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false);
         let mut data = text.into_bytes();
         // Room for the brackets around it.
@@ -298,6 +340,104 @@ impl TerminalView {
         }
     }
 
+    /// Where position, in the window, is on the grid; the cell is the nearest one when it's off
+    /// the grid.
+    fn grid_position(&self, position: Point<Pixels>) -> Option<GridPosition> {
+        let cell = self.cell?;
+        let (cols, rows) = (self.term.cols().ok()?, self.term.rows().ok()?);
+        let x = (position.x - self.grid.left()) / cell.width;
+        let y = (position.y - self.grid.top()) / cell.height;
+        Some(GridPosition {
+            x: f64::from(x) * UNIT,
+            y: f64::from(y) * UNIT,
+            cell: PointCoordinate {
+                x: (x.max(0.) as u16).min(cols - 1),
+                y: (y.max(0.) as u32).min(u32::from(rows) - 1),
+            },
+        })
+    }
+
+    /// Opens the link clicked with the key for it held, or starts selecting.
+    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
+        let Some(at) = self.grid_position(event.position) else {
+            return;
+        };
+        if event.modifiers.secondary()
+            && let Some(link) = selection::link_at(&self.term, at.cell)
+        {
+            cx.open_url(&link.url);
+            return;
+        }
+        self.selecting = true;
+        self.mouse = event.position;
+        let _ = self.selector.press(&self.term, at);
+        cx.notify();
+    }
+
+    fn mouse_move(&mut self, position: Point<Pixels>, modifiers: Modifiers, cx: &mut Context<Self>) {
+        if !self.selecting {
+            self.hover(position, modifiers, cx);
+            return;
+        }
+        self.mouse = position;
+        let Some(at) = self.grid_position(position) else {
+            return;
+        };
+        let _ = self.selector.drag(&self.term, at);
+        if !self.autoscrolling && self.selector.autoscrolls(&self.term) {
+            self.autoscrolling = true;
+            self.autoscroll = cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(AUTOSCROLL_INTERVAL).await;
+                    if !matches!(this.update(cx, |view, cx| view.autoscroll(cx)), Ok(true)) {
+                        break;
+                    }
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    /// Scrolls a row the way the selection is dragged, while it's past the top or bottom; returns
+    /// whether it goes on.
+    fn autoscroll(&mut self, cx: &mut Context<Self>) -> bool {
+        let at = self.grid_position(self.mouse);
+        self.autoscrolling = self.selecting && self.selector.autoscrolls(&self.term);
+        if let Some(at) = at.filter(|_| self.autoscrolling) {
+            let _ = self.selector.tick(&self.term, at);
+            cx.notify();
+        }
+        self.autoscrolling
+    }
+
+    /// Ends selecting, and on Linux offers what's selected for a middle click to paste.
+    fn mouse_up(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.selecting) {
+            return;
+        }
+        if let Some(at) = self.grid_position(position) {
+            let _ = self.selector.release(&self.term, at);
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(text) = selection::text(&self.term) {
+            cx.write_to_primary(ClipboardItem::new_string(text));
+        }
+        cx.notify();
+    }
+
+    /// Underlines the link under the mouse while the key to open it is held.
+    fn hover(&mut self, position: Point<Pixels>, modifiers: Modifiers, cx: &mut Context<Self>) {
+        let link = self
+            .grid_position(position)
+            .filter(|_| modifiers.secondary() && self.grid.contains(&position))
+            .and_then(|at| selection::link_at(&self.term, at.cell));
+        if link != self.link {
+            self.link = link;
+            cx.notify();
+        }
+    }
+
     /// Starts dragging the scrollbar's thumb from y: where it's grabbed, or from its middle,
     /// moved there, when the track is clicked.
     fn grab_scrollbar(&mut self, bar: Scrollbar, y: Pixels, cx: &mut Context<Self>) {
@@ -329,6 +469,7 @@ impl TerminalView {
     /// Sizes the terminal to fit bounds, with cells of cell. The shell hears of a new size once it
     /// has settled, so that dragging the window's edge doesn't make it redraw at every step.
     fn fit(&mut self, bounds: Bounds<Pixels>, font_size: Pixels, cell: Size<Pixels>, cx: &mut Context<Self>) {
+        self.grid = bounds;
         if (self.cell, self.font_size) != (Some(cell), font_size) {
             (self.cell, self.font_size) = (Some(cell), font_size);
             self.shaped.clear();
@@ -357,6 +498,7 @@ impl TerminalView {
         window: &mut Window,
     ) -> ghostty_vt::error::Result<Layout> {
         let scrollbar = self.scrollbar(bounds);
+        let link = self.link_underline(bounds, cell);
         let snapshot = self.render.update(&self.term)?;
         if snapshot.dirty()? == Dirty::Full {
             self.shaped.clear();
@@ -370,8 +512,12 @@ impl TerminalView {
             line_height: cell.height,
             rows: Vec::new(),
             cursor: None,
+            selections: Vec::new(),
+            link,
             scrollbar,
             scrollbar_hitbox: None,
+            hitbox: None,
+            pointing: self.link.is_some(),
         };
         // A blinking cursor is hidden every other interval, while the terminal has focus.
         let shown = cursor.visible && (!cursor.blinking || !focused || self.blink_on);
@@ -391,6 +537,13 @@ impl TerminalView {
                 )?),
             };
             layout.rows.push((at(y, 0), line.clone()));
+            if let Some(selected) = row.selection()? {
+                let cells = f32::from(selected.end_x.saturating_sub(selected.start_x) + 1);
+                layout.selections.push(Bounds::new(
+                    at(y, selected.start_x),
+                    size(cell.width * cells, cell.height),
+                ));
+            }
             shaped.insert(id, line);
 
             if let Some(position) = cursor.viewport.filter(|position| shown && position.y == y) {
@@ -457,6 +610,22 @@ impl TerminalView {
         self.shaped = shaped;
         snapshot.clean()?;
         Ok(layout)
+    }
+
+    /// The underline of the link under the mouse, row by row.
+    fn link_underline(&self, bounds: Bounds<Pixels>, cell: Size<Pixels>) -> Vec<Bounds<Pixels>> {
+        let (Some(link), Ok(cols)) = (&self.link, self.term.cols()) else {
+            return Vec::new();
+        };
+        (link.start.y..=link.end.y)
+            .map(|y| {
+                let first = if y == link.start.y { link.start.x } else { 0 };
+                let last = if y == link.end.y { link.end.x } else { cols - 1 };
+                let origin =
+                    bounds.origin + point(cell.width * f32::from(first), cell.height * (y + 1) as f32 - px(2.));
+                Bounds::new(origin, size(cell.width * f32::from(last - first + 1), px(1.)))
+            })
+            .collect()
     }
 
     /// The scrollbar, in the padding right of bounds, when there's scrollback to scroll through.
@@ -589,7 +758,11 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::key_down))
+            .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
+            .on_modifiers_changed(cx.listener(|view, event: &ModifiersChangedEvent, window, cx| {
+                view.hover(window.mouse_position(), event.modifiers, cx)
+            }))
             .on_action(|_: &IncreaseFontSize, _, cx| set_font_size(Settings::get(cx).font_size + 1., cx))
             .on_action(|_: &DecreaseFontSize, _, cx| set_font_size(Settings::get(cx).font_size - 1., cx))
             .on_action(|_: &ResetFontSize, _, cx| set_font_size(Settings::default().font_size, cx))
@@ -610,6 +783,7 @@ impl Render for TerminalView {
                             view.fit(bounds, font_size, cell, cx);
                             view.layout(bounds, font_size, cell, focused, window).ok()
                         })?;
+                        layout.hitbox = Some(window.insert_hitbox(bounds, HitboxBehavior::Normal));
                         layout.scrollbar_hitbox = layout
                             .scrollbar
                             .map(|bar| window.insert_hitbox(bar.target, HitboxBehavior::BlockMouse));
@@ -658,8 +832,15 @@ struct Layout {
     line_height: Pixels,
     rows: Vec<(Point<Pixels>, Rc<ShapedRow>)>,
     cursor: Option<Cursor>,
+    /// What's selected, row by row.
+    selections: Vec<Bounds<Pixels>>,
+    link: Vec<Bounds<Pixels>>,
     scrollbar: Option<Scrollbar>,
     scrollbar_hitbox: Option<Hitbox>,
+    /// The grid, for the mouse.
+    hitbox: Option<Hitbox>,
+    /// Whether the mouse is on a link to open.
+    pointing: bool,
 }
 
 /// The scrollbar's track and thumb, where it can be grabbed, and how many rows there are to scroll
@@ -692,6 +873,9 @@ impl Layout {
                 window.paint_quad(fill(Bounds::new(*origin + bounds.origin, bounds.size), *color));
             }
         }
+        for bounds in &self.selections {
+            window.paint_quad(fill(*bounds, theme::selection()));
+        }
         for (origin, row) in &self.rows {
             for (at, line) in &row.lines {
                 let _ = line.paint(*origin + *at, line_height, TextAlign::Left, None, window, cx);
@@ -703,10 +887,52 @@ impl Layout {
                 let _ = glyph.paint(origin, line_height, TextAlign::Left, None, window, cx);
             }
         }
+        for bounds in self.link {
+            window.paint_quad(fill(bounds, theme::foreground()));
+        }
+        if let Some(hitbox) = self.hitbox {
+            let cursor = if self.pointing {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::IBeam
+            };
+            window.set_cursor_style(cursor, &hitbox);
+            handle_mouse(hitbox, view, window);
+        }
         if let (Some(bar), Some(hitbox)) = (self.scrollbar, self.scrollbar_hitbox) {
             paint_scrollbar(bar, hitbox, view, window, cx);
         }
     }
+}
+
+/// Lets the mouse select text and open links on the grid. Once it's down, dragging goes on wherever
+/// the mouse goes, until it's let go.
+fn handle_mouse(hitbox: Hitbox, view: &Entity<TerminalView>, window: &mut Window) {
+    let pressed = view.clone();
+    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+        if !phase.bubble() || !hitbox.is_hovered(window) {
+            return;
+        }
+        match event.button {
+            MouseButton::Left => pressed.update(cx, |view, cx| view.mouse_down(event, window, cx)),
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            MouseButton::Middle => pressed.update(cx, |view, cx| view.paste_primary(window, cx)),
+            _ => return,
+        }
+        cx.stop_propagation();
+    });
+    let moved = view.clone();
+    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+        if phase.bubble() {
+            moved.update(cx, |view, cx| view.mouse_move(event.position, event.modifiers, cx));
+        }
+    });
+    let released = view.clone();
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+        if phase.bubble() && event.button == MouseButton::Left {
+            released.update(cx, |view, cx| view.mouse_up(event.position, cx));
+        }
+    });
 }
 
 /// Paints the scrollbar, and lets its thumb be dragged, or the track clicked to scroll there.
