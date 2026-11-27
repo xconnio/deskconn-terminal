@@ -211,13 +211,25 @@ impl Workspace {
             .when(self.tabs.is_empty(), |bar| {
                 bar.child(
                     div()
+                        .flex_none()
                         .px_3()
                         .text_sm()
                         .text_color(theme::muted())
                         .child("DeskConn Terminal"),
                 )
             })
-            .child(div().flex().flex_row().h_full().items_end().min_w_0().children(tabs))
+            // Tabs shrink to make room, and are cut off past that, rather than run under the buttons.
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_shrink()
+                    .h_full()
+                    .items_end()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .children(tabs),
+            )
             .child(
                 button("new-tab", "+")
                     .ml_1()
@@ -231,7 +243,8 @@ impl Workspace {
                     }))
                     .when(self.menu, |button| button.child(self.render_menu(cx))),
             )
-            .child(div().flex_1())
+            // Room to drag the window by, however many tabs there are.
+            .child(div().flex_1().min_w(px(48.)))
             .when(!mac, |bar| bar.child(window_controls(window)))
     }
 
@@ -245,6 +258,8 @@ impl Workspace {
             .items_center()
             .gap_2()
             .h(px(32.))
+            .flex_shrink()
+            .min_w(px(72.))
             .max_w(px(240.))
             .pl_3()
             .pr_1()
@@ -431,6 +446,7 @@ fn button(id: impl Into<gpui::ElementId>, label: &'static str) -> gpui::Stateful
         .flex()
         .items_center()
         .justify_center()
+        .flex_none()
         .size(px(24.))
         .rounded_md()
         .text_color(theme::muted())
@@ -457,6 +473,7 @@ fn window_controls(window: &Window) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
+        .flex_none()
         .h_full()
         .child(
             control("minimize", "—", WindowControlArea::Min)

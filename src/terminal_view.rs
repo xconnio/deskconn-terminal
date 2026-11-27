@@ -16,22 +16,20 @@ use ghostty_vt::style::{StyleColor, Underline};
 use ghostty_vt::terminal::{Event as TermEvent, Mode, Options, ScrollViewport};
 use gpui::{
     App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight,
-    Global, Hitbox, HitboxBehavior, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, Size, StrikethroughStyle, Task, TextAlign, TextRun,
-    UnderlineStyle, Window, actions, canvas, div, fill, hsla, outline, point, prelude::*, px, size,
+    Hitbox, HitboxBehavior, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, ScrollWheelEvent, ShapedLine, Size, StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle,
+    Window, actions, canvas, div, fill, hsla, outline, point, prelude::*, px, size,
 };
 use tokio::sync::mpsc;
 
 use crate::daemon::Machine;
 use crate::keys::KeyEncoder;
 use crate::session::{self, Command, Event};
+use crate::settings::Settings;
 use crate::theme;
 
 actions!(terminal, [Paste, IncreaseFontSize, DecreaseFontSize, ResetFontSize]);
 
-const DEFAULT_FONT_SIZE: Pixels = px(14.);
-/// The smallest and largest font sizes the user can pick.
-const FONT_SIZES: (f32, f32) = (8., 40.);
 const LINE_HEIGHT: f32 = 1.3;
 /// How long the terminal's size has to stay the same before the shell is told of it.
 const RESIZE_DELAY: Duration = Duration::from_millis(100);
@@ -43,20 +41,14 @@ const BLINK_TIMEOUT: Duration = Duration::from_secs(10);
 const SCROLLBAR_WIDTH: Pixels = px(6.);
 const SCROLLBAR_MIN_THUMB: Pixels = px(24.);
 
-/// The terminals' font size, as the user set it.
-struct FontSize(Pixels);
-
-impl Global for FontSize {}
-
 fn font_size(cx: &App) -> Pixels {
-    cx.try_global::<FontSize>().map_or(DEFAULT_FONT_SIZE, |size| size.0)
+    px(Settings::get(cx).font_size)
 }
 
-/// Sets every terminal's font size.
-fn set_font_size(size: Pixels, cx: &mut App) {
-    let (min, max) = FONT_SIZES;
-    cx.set_global(FontSize(px(f32::from(size).clamp(min, max))));
-    cx.refresh_windows();
+/// Sets every terminal's font size, to keep.
+fn set_font_size(size: f32, cx: &mut App) {
+    let (min, max) = Settings::FONT_SIZES;
+    Settings::update(cx, |settings| settings.font_size = size.clamp(min, max));
 }
 
 /// The session ended: the tab is to close.
@@ -155,7 +147,7 @@ impl TerminalView {
             focus,
             title: None,
             cell: None,
-            font_size: DEFAULT_FONT_SIZE,
+            font_size: px(0.),
             shaped: HashMap::new(),
             resize: None,
             scroll: px(0.),
@@ -594,9 +586,9 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(Self::paste))
-            .on_action(|_: &IncreaseFontSize, _, cx| set_font_size(font_size(cx) + px(1.), cx))
-            .on_action(|_: &DecreaseFontSize, _, cx| set_font_size(font_size(cx) - px(1.), cx))
-            .on_action(|_: &ResetFontSize, _, cx| set_font_size(DEFAULT_FONT_SIZE, cx))
+            .on_action(|_: &IncreaseFontSize, _, cx| set_font_size(Settings::get(cx).font_size + 1., cx))
+            .on_action(|_: &DecreaseFontSize, _, cx| set_font_size(Settings::get(cx).font_size - 1., cx))
+            .on_action(|_: &ResetFontSize, _, cx| set_font_size(Settings::default().font_size, cx))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(
                 MouseButton::Left,

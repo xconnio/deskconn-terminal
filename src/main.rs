@@ -4,6 +4,7 @@ mod daemon;
 mod keys;
 mod protocol;
 mod session;
+mod settings;
 mod terminal_view;
 mod theme;
 mod workspace;
@@ -35,6 +36,7 @@ fn main() {
         cx.text_system()
             .add_fonts(terminal_view::fonts())
             .expect("load the terminal's font");
+        cx.set_global(settings::Settings::load());
         bind_keys(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
