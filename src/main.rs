@@ -1,6 +1,8 @@
 //! DeskConn Terminal: terminals on your DeskConn machines, through the local deskconn daemon.
 
 mod daemon;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod desktop;
 mod keys;
 mod links;
 mod palette;
@@ -22,6 +24,9 @@ use gpui::{
 use crate::terminal_view::{Clear, Copy, DecreaseFontSize, IncreaseFontSize, Paste, Reset, ResetFontSize};
 use crate::workspace::{ActivateTab, CloseTab, NewTab, NewTabOn, NextTab, PreviousTab, Quit, Workspace};
 
+/// The window's app ID, by which a desktop knows the app, and finds its icon.
+const APP_ID: &str = "io.xconn.deskconn.terminal";
+
 /// The runtime the sessions' connections run on.
 pub fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
@@ -35,6 +40,10 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
 }
 
 fn main() {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    if let Err(err) = desktop::register() {
+        eprintln!("register with the desktop: {err:#}");
+    }
     gpui_platform::application().run(|cx: &mut App| {
         cx.text_system()
             .add_fonts(terminal_view::fonts())
@@ -57,7 +66,7 @@ fn main() {
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),
             window_decorations: Some(WindowDecorations::Client),
-            app_id: Some("io.xconn.deskconn.terminal".into()),
+            app_id: Some(APP_ID.into()),
             window_min_size: Some(size(px(360.), px(200.))),
             ..Default::default()
         };
