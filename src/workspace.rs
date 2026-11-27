@@ -220,6 +220,7 @@ impl Workspace {
                     }
                 }
             })
+            // Tabs and buttons keep their clicks, so only the bar's empty room opens the window menu.
             .on_mouse_down(MouseButton::Right, |event, window, _| {
                 window.show_window_menu(event.position)
             })
@@ -287,6 +288,7 @@ impl Workspace {
                 tab.text_color(theme::muted()).hover(|tab| tab.bg(theme::tab_hover()))
             })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| this.activate(index, window, cx)))
             .on_mouse_up(
                 MouseButton::Middle,
@@ -468,6 +470,7 @@ fn button(id: impl Into<gpui::ElementId>, label: &'static str) -> gpui::Stateful
         .text_color(theme::muted())
         .hover(|button| button.bg(theme::tab_hover()).text_color(theme::foreground()))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         .child(label)
 }
 
@@ -484,6 +487,7 @@ fn window_controls(window: &Window) -> impl IntoElement {
             .text_color(theme::muted())
             .window_control_area(area)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .child(label)
     };
     div()
