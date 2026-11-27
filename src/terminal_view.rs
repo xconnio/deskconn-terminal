@@ -17,9 +17,9 @@ use ghostty_vt::terminal::{Event as TermEvent, Mode, Options, PointCoordinate, S
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
     FontWeight, Hitbox, HitboxBehavior, Hsla, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, Size,
-    StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle, Window, actions, canvas, div, fill, hsla, outline,
-    point, prelude::*, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString,
+    Size, StrikethroughStyle, Task, TextAlign, TextRun, UnderlineStyle, Window, actions, anchored, canvas, deferred,
+    div, fill, hsla, outline, point, prelude::*, px, size,
 };
 use tokio::sync::mpsc;
 
@@ -32,7 +32,14 @@ use crate::theme;
 
 actions!(
     terminal,
-    [Copy, Paste, IncreaseFontSize, DecreaseFontSize, ResetFontSize]
+    [
+        Copy,
+        Paste,
+        ClearScrollback,
+        IncreaseFontSize,
+        DecreaseFontSize,
+        ResetFontSize
+    ]
 );
 
 const LINE_HEIGHT: f32 = 1.3;
@@ -103,6 +110,14 @@ pub struct TerminalView {
     grid: Bounds<Pixels>,
     /// The link under the mouse, while the key to open it is held.
     link: Option<Link>,
+    menu: Option<ContextMenu>,
+}
+
+/// The menu a right click opens: where, and whether there's a selection to copy.
+#[derive(Clone, Copy)]
+struct ContextMenu {
+    position: Point<Pixels>,
+    can_copy: bool,
 }
 
 impl EventEmitter<Closed> for TerminalView {}
@@ -182,6 +197,7 @@ impl TerminalView {
             autoscroll: Task::ready(()),
             grid: Bounds::default(),
             link: None,
+            menu: None,
         })
     }
 
@@ -265,6 +281,13 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu.take().is_some() {
+            cx.notify();
+            if event.keystroke.key == "escape" {
+                cx.stop_propagation();
+                return;
+            }
+        }
         let bytes = self.keys.encode(&event.keystroke, &self.term);
         if !bytes.is_empty() {
             self.restart_blink(window, cx);
@@ -285,6 +308,87 @@ impl TerminalView {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.paste_text(text, window, cx);
         }
+    }
+
+    /// Forgets the lines scrolled off the top.
+    fn clear_scrollback(&mut self, _: &ClearScrollback, _window: &mut Window, cx: &mut Context<Self>) {
+        self.term.vt_write(b"\x1b[3J");
+        self.term.scroll_viewport(ScrollViewport::Bottom);
+        cx.notify();
+    }
+
+    fn open_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
+        self.menu = Some(ContextMenu {
+            position,
+            can_copy: self.term.selection().is_ok_and(|selection| selection.is_some()),
+        });
+        cx.notify();
+    }
+
+    fn render_menu(&self, menu: ContextMenu, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let shortcut = |action: &dyn gpui::Action| -> Option<SharedString> {
+            let binding = window.highest_precedence_binding_for_action_in(action, &self.focus)?;
+            let keys: Vec<_> = binding.keystrokes().iter().map(shortcut_label).collect();
+            Some(keys.join(" ").into())
+        };
+        let item = |id: &'static str, label: &'static str, shortcut: Option<SharedString>, enabled: bool| {
+            div()
+                .id(id)
+                .flex()
+                .justify_between()
+                .gap_6()
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .text_sm()
+                .when(enabled, |item| {
+                    item.text_color(theme::foreground())
+                        .hover(|item| item.bg(theme::tab_hover()))
+                })
+                .when(!enabled, |item| item.text_color(theme::muted().opacity(0.6)))
+                .child(label)
+                .children(shortcut.map(|keys| div().text_color(theme::muted()).child(keys)))
+        };
+        let copy = item("copy", "Copy", shortcut(&Copy), menu.can_copy);
+        let paste = item("paste", "Paste", shortcut(&Paste), true);
+        let clear = item("clear-scrollback", "Clear Scrollback", shortcut(&ClearScrollback), true);
+        deferred(
+            anchored()
+                .position(menu.position)
+                .snap_to_window_with_margin(px(8.))
+                .child(
+                    div()
+                        .id("terminal-menu")
+                        .occlude()
+                        .min_w(px(200.))
+                        .p_1()
+                        .bg(theme::titlebar())
+                        .border_1()
+                        .border_color(theme::border())
+                        .rounded_lg()
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(|view, _, _, cx| {
+                            view.menu = None;
+                            cx.notify();
+                        }))
+                        .child(copy.when(menu.can_copy, |item| {
+                            item.on_click(cx.listener(|view, _, window, cx| {
+                                view.menu = None;
+                                view.copy(&Copy, window, cx);
+                            }))
+                        }))
+                        .child(paste.on_click(cx.listener(|view, _, window, cx| {
+                            view.menu = None;
+                            view.paste(&Paste, window, cx);
+                        })))
+                        .child(div().my_1().h(px(1.)).bg(theme::border()))
+                        .child(clear.on_click(cx.listener(|view, _, window, cx| {
+                            view.menu = None;
+                            view.clear_scrollback(&ClearScrollback, window, cx);
+                        }))),
+                ),
+        )
     }
 
     /// Pastes what's selected, here or in another app, as a middle click does on Linux.
@@ -760,6 +864,7 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::clear_scrollback))
             .on_modifiers_changed(cx.listener(|view, event: &ModifiersChangedEvent, window, cx| {
                 view.hover(window.mouse_position(), event.modifiers, cx)
             }))
@@ -797,6 +902,38 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
+            .children(self.menu.map(|menu| self.render_menu(menu, window, cx)))
+    }
+}
+
+/// How a menu shows a keystroke: "Ctrl+Shift+C", or "⇧⌘C" on macOS.
+fn shortcut_label(keystroke: &gpui::KeybindingKeystroke) -> String {
+    let m = keystroke.modifiers();
+    let mut chars = keystroke.key().chars();
+    let key: String = chars
+        .next()
+        .into_iter()
+        .flat_map(char::to_uppercase)
+        .chain(chars)
+        .collect();
+    if cfg!(target_os = "macos") {
+        let symbols = [(m.control, "⌃"), (m.alt, "⌥"), (m.shift, "⇧"), (m.platform, "⌘")];
+        symbols
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, symbol)| *symbol)
+            .collect::<String>()
+            + &key
+    } else {
+        let names = [
+            (m.control, "Ctrl"),
+            (m.alt, "Alt"),
+            (m.shift, "Shift"),
+            (m.platform, "Super"),
+        ];
+        let mut parts: Vec<_> = names.iter().filter(|(on, _)| *on).map(|(_, name)| *name).collect();
+        parts.push(&key);
+        parts.join("+")
     }
 }
 
@@ -917,6 +1054,7 @@ fn handle_mouse(hitbox: Hitbox, view: &Entity<TerminalView>, window: &mut Window
             MouseButton::Left => pressed.update(cx, |view, cx| view.mouse_down(event, window, cx)),
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             MouseButton::Middle => pressed.update(cx, |view, cx| view.paste_primary(window, cx)),
+            MouseButton::Right => pressed.update(cx, |view, cx| view.open_menu(event.position, window, cx)),
             _ => return,
         }
         cx.stop_propagation();
