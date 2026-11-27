@@ -1,15 +1,23 @@
 //! The app's colors, and the terminal's palette.
 
-use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
+use ghostty_vt::style::{Palette, RgbColor};
 use gpui::{Hsla, Rgba, rgb};
 
+const BACKGROUND: u32 = 0x1e1e1e;
+const FOREGROUND: u32 = 0xd4d4d4;
+
+/// The 16 ANSI colors: normal, then bright. The rest of the 256 are libghostty's.
+const ANSI: [u32; 16] = [
+    0x000000, 0xcd3131, 0x0dbc79, 0xe5e510, 0x2472c8, 0xbc3fbc, 0x11a8cd, 0xe5e5e5, 0x666666, 0xf14c4c, 0x23d18b,
+    0xf5f543, 0x3b8eea, 0xd670d6, 0x29b8db, 0xffffff,
+];
+
 pub fn background() -> Hsla {
-    rgb(0x1e1e1e).into()
+    rgb(BACKGROUND).into()
 }
 
 pub fn foreground() -> Hsla {
-    rgb(0xd4d4d4).into()
+    rgb(FOREGROUND).into()
 }
 
 pub fn titlebar() -> Hsla {
@@ -40,68 +48,21 @@ pub fn close_hover() -> Hsla {
     rgb(0xc42b1c).into()
 }
 
-/// The 16 ANSI colors: normal, then bright.
-const ANSI: [u32; 16] = [
-    0x000000, 0xcd3131, 0x0dbc79, 0xe5e510, 0x2472c8, 0xbc3fbc, 0x11a8cd, 0xe5e5e5, 0x666666, 0xf14c4c, 0x23d18b,
-    0xf5f543, 0x3b8eea, 0xd670d6, 0x29b8db, 0xffffff,
-];
-
-/// The color a cell's color is, given the colors the terminal's programs have set.
-pub fn resolve(color: Color, colors: &Colors) -> Hsla {
-    match color {
-        Color::Spec(c) => to_hsla(c),
-        Color::Indexed(i) => colors[i as usize].map_or_else(|| indexed(i), to_hsla),
-        Color::Named(name) => colors[name].map_or_else(|| named(name), to_hsla),
-    }
+/// The terminal's default foreground and background.
+pub fn terminal_colors() -> (RgbColor, RgbColor) {
+    (to_rgb(FOREGROUND), to_rgb(BACKGROUND))
 }
 
-/// A named color's bright variant, which bold text of a normal color is drawn in.
-pub fn brighten(color: Color) -> Color {
-    match color {
-        Color::Named(name) if (name as usize) < 8 => Color::Indexed(name as u8 + 8),
-        Color::Indexed(i) if i < 8 => Color::Indexed(i + 8),
-        color => color,
+/// The terminal's palette: libghostty's, with the app's ANSI colors.
+pub fn palette(default: Palette) -> Palette {
+    let mut palette = default;
+    for (slot, color) in palette.0.iter_mut().zip(ANSI) {
+        *slot = to_rgb(color);
     }
+    palette
 }
 
-fn named(name: NamedColor) -> Hsla {
-    match name {
-        NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::Cursor => foreground(),
-        NamedColor::Background => background(),
-        NamedColor::DimForeground => foreground().opacity(0.66),
-        name => {
-            let i = name as usize;
-            if i < 16 {
-                indexed(i as u8)
-            } else {
-                // DimBlack to DimWhite.
-                indexed((i - NamedColor::DimBlack as usize) as u8).opacity(0.66)
-            }
-        }
-    }
-}
-
-/// One of the 256 indexed colors: the ANSI colors, a 6×6×6 cube, and 24 grays.
-fn indexed(i: u8) -> Hsla {
-    match i {
-        0..16 => rgb(ANSI[i as usize]).into(),
-        16..232 => {
-            let i = i - 16;
-            let level = |v: u8| if v == 0 { 0 } else { 55 + 40 * v };
-            to_hsla(Rgb {
-                r: level(i / 36),
-                g: level(i / 6 % 6),
-                b: level(i % 6),
-            })
-        }
-        232.. => {
-            let v = 8 + 10 * (i - 232);
-            to_hsla(Rgb { r: v, g: v, b: v })
-        }
-    }
-}
-
-fn to_hsla(c: Rgb) -> Hsla {
+pub fn to_hsla(c: RgbColor) -> Hsla {
     Rgba {
         r: f32::from(c.r) / 255.,
         g: f32::from(c.g) / 255.,
@@ -111,26 +72,7 @@ fn to_hsla(c: Rgb) -> Hsla {
     .into()
 }
 
-/// The color of a cell's color as RGB, which programs may ask for.
-pub fn to_rgb(color: Hsla) -> Rgb {
-    let c = Rgba::from(color);
-    let byte = |v: f32| (v * 255.).round() as u8;
-    Rgb {
-        r: byte(c.r),
-        g: byte(c.g),
-        b: byte(c.b),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cube_and_grays() {
-        assert_eq!(to_rgb(indexed(16)), Rgb { r: 0, g: 0, b: 0 });
-        assert_eq!(to_rgb(indexed(231)), Rgb { r: 255, g: 255, b: 255 });
-        assert_eq!(to_rgb(indexed(196)), Rgb { r: 255, g: 0, b: 0 });
-        assert_eq!(to_rgb(indexed(232)), Rgb { r: 8, g: 8, b: 8 });
-    }
+fn to_rgb(c: u32) -> RgbColor {
+    let [_, r, g, b] = c.to_be_bytes();
+    RgbColor { r, g, b }
 }

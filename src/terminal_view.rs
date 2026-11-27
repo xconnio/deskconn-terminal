@@ -1,15 +1,13 @@
-//! A tab's terminal: the session's output drawn as alacritty's grid, and the user's keys sent
-//! to it.
+//! A tab's terminal: the session's output taken in by libghostty-vt and drawn from its
+//! render state, and the user's keys sent to it.
 
-use std::cell::RefCell;
 use std::path::PathBuf;
-use std::rc::Rc;
 
-use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor};
+use ghostty_vt::Terminal;
+use ghostty_vt::render::{CellIterator, CursorVisualStyle, RenderState, RowIterator};
+use ghostty_vt::screen::{CellWide, Screen};
+use ghostty_vt::style::{StyleColor, Underline};
+use ghostty_vt::terminal::{Event as TermEvent, Mode, Options, ScrollViewport};
 use gpui::{
     App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, Hsla,
     KeyDownEvent, MouseButton, PaintQuad, Pixels, ScrollWheelEvent, ShapedLine, StrikethroughStyle, TextAlign, TextRun,
@@ -18,24 +16,25 @@ use gpui::{
 use tokio::sync::mpsc;
 
 use crate::daemon::Machine;
+use crate::keys::KeyEncoder;
 use crate::session::{self, Command, Event};
-use crate::{keys, theme};
+use crate::theme;
 
 actions!(terminal, [Paste]);
 
 const FONT_SIZE: Pixels = px(14.);
 const LINE_HEIGHT: f32 = 1.3;
-const SCROLLBACK: usize = 10_000;
 
 /// The session ended: the tab is to close.
 pub struct Closed;
 
 pub struct TerminalView {
     pub machine: Machine,
-    term: Term<Listener>,
-    parser: Processor,
-    /// What the terminal asked for while taking in output.
-    requests: Rc<RefCell<Vec<TermEvent>>>,
+    term: Terminal,
+    render: RenderState,
+    rows: RowIterator,
+    cells: CellIterator,
+    keys: KeyEncoder,
     commands: mpsc::UnboundedSender<Command>,
     /// The session's task, until it's ended.
     session: Option<tokio::task::JoinHandle<()>>,
@@ -58,25 +57,23 @@ impl Focusable for TerminalView {
 
 impl TerminalView {
     /// Starts a new session on machine, through the daemon of dir.
-    pub fn new(machine: Machine, dir: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(machine: Machine, dir: PathBuf, cx: &mut Context<Self>) -> ghostty_vt::error::Result<Self> {
         let (cols, rows) = (80, 24);
-        let requests = Rc::default();
-        let config = Config {
-            scrolling_history: SCROLLBACK,
-            ..Config::default()
-        };
-        let term = Term::new(config, &GridSize { cols, rows }, Listener(Rc::clone(&requests)));
+        let mut term = Terminal::new(Options {
+            cols,
+            rows,
+            ..Options::default()
+        })?;
+        let (fg, bg) = theme::terminal_colors();
+        let palette = theme::palette(term.default_color_palette()?);
+        term.set_default_fg_color(Some(fg))?
+            .set_default_bg_color(Some(bg))?
+            .set_default_color_palette(Some(palette))?;
+        term.set_size_reports(true);
 
         let (commands, rx) = mpsc::unbounded_channel();
         let (tx, mut events) = mpsc::unbounded_channel();
-        let session = crate::runtime().spawn(session::run(
-            dir,
-            machine.realm.clone(),
-            cols as u16,
-            rows as u16,
-            rx,
-            tx,
-        ));
+        let session = crate::runtime().spawn(session::run(dir, machine.realm.clone(), cols, rows, rx, tx));
         cx.spawn(async move |this, cx| {
             while let Some(event) = events.recv().await {
                 // Take in what's arrived since in one go, and draw once.
@@ -91,18 +88,20 @@ impl TerminalView {
         })
         .detach();
 
-        Self {
+        Ok(Self {
             machine,
             term,
-            parser: Processor::new(),
-            requests,
+            render: RenderState::new()?,
+            rows: RowIterator::new()?,
+            cells: CellIterator::new()?,
+            keys: KeyEncoder::new()?,
             commands,
             session: Some(session),
             focus: cx.focus_handle(),
             title: None,
             cell: None,
             scroll: px(0.),
-        }
+        })
     }
 
     /// Ends the session, and the shell with it, returning its task to wait for.
@@ -114,7 +113,7 @@ impl TerminalView {
     fn handle(&mut self, events: Vec<Event>, cx: &mut Context<Self>) {
         for event in events {
             match event {
-                Event::Output(data) => self.parser.advance(&mut self.term, &data),
+                Event::Output(data) => self.term.vt_write(&data),
                 Event::Reconnecting => self.notice("Connection lost; reconnecting…"),
                 Event::Reconnected => {}
                 Event::Exited(_) => {
@@ -132,37 +131,23 @@ impl TerminalView {
     /// Shows a message from the app on a line of its own.
     fn notice(&mut self, message: &str) {
         let text = format!("\x1b[0m\r\n\x1b[2m[deskconn] {message}\x1b[0m\r\n");
-        self.parser.advance(&mut self.term, text.as_bytes());
+        self.term.vt_write(text.as_bytes());
     }
 
-    /// Answers what the terminal's programs asked of it.
+    /// Answers what the terminal's programs asked of it, and takes in what they told it.
     fn answer_requests(&mut self, cx: &mut Context<Self>) {
-        let requests = std::mem::take(&mut *self.requests.borrow_mut());
-        for request in requests {
-            match request {
-                TermEvent::PtyWrite(text) => self.send(text.into_bytes()),
-                TermEvent::Title(title) => self.title = Some(title),
-                TermEvent::ResetTitle => self.title = None,
-                TermEvent::ClipboardStore(_, text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
-                TermEvent::ColorRequest(index, format) => {
-                    let color = match index {
-                        256 => Color::Named(NamedColor::Foreground),
-                        257 => Color::Named(NamedColor::Background),
-                        258 => Color::Named(NamedColor::Cursor),
-                        i => Color::Indexed(i.min(255) as u8),
-                    };
-                    let rgb = theme::to_rgb(theme::resolve(color, self.term.colors()));
-                    self.send(format(rgb).into_bytes());
-                }
-                TermEvent::TextAreaSizeRequest(format) => {
-                    if let Some(cell) = self.cell {
-                        let size = WindowSize {
-                            num_lines: self.term.screen_lines() as u16,
-                            num_cols: self.term.columns() as u16,
-                            cell_width: f32::from(cell.width) as u16,
-                            cell_height: f32::from(cell.height) as u16,
-                        };
-                        self.send(format(size).into_bytes());
+        let events: Vec<_> = self.term.events().collect();
+        for event in events {
+            match event {
+                TermEvent::PtyWrite(data) => self.send(data),
+                TermEvent::TitleChanged(title) => self.title = Some(title).filter(|title| !title.is_empty()),
+                TermEvent::ClipboardWrite(write) => {
+                    let text = write
+                        .contents
+                        .into_iter()
+                        .find(|content| content.mime.starts_with("text/plain"));
+                    if let Some(text) = text {
+                        cx.write_to_clipboard(ClipboardItem::new_string(String::from_utf8_lossy(&text.data).into()));
                     }
                 }
                 _ => {}
@@ -175,8 +160,9 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(bytes) = keys::to_esc(&event.keystroke, *self.term.mode()) {
-            self.term.scroll_display(Scroll::Bottom);
+        let bytes = self.keys.encode(&event.keystroke, &self.term);
+        if !bytes.is_empty() {
+            self.term.scroll_viewport(ScrollViewport::Bottom);
             self.send(bytes);
             cx.stop_propagation();
             cx.notify();
@@ -187,15 +173,16 @@ impl TerminalView {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
-        // Pasted lines end as typed ones do.
-        let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        let data = if self.term.mode().contains(TermMode::BRACKETED_PASTE) {
-            format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
-        } else {
-            text
+        let bracketed = self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false);
+        let mut data = text.into_bytes();
+        // Room for the brackets around it.
+        let mut encoded = vec![0; data.len() + 16];
+        let Ok(n) = ghostty_vt::paste::encode(&mut data, bracketed, &mut encoded) else {
+            return;
         };
-        self.term.scroll_display(Scroll::Bottom);
-        self.send(data.into_bytes());
+        encoded.truncate(n);
+        self.term.scroll_viewport(ScrollViewport::Bottom);
+        self.send(encoded);
         cx.notify();
     }
 
@@ -207,23 +194,24 @@ impl TerminalView {
             return;
         }
         self.scroll -= cell.height * lines as f32;
-        let mode = *self.term.mode();
-        if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+        let alternate = self
+            .term
+            .active_screen()
+            .is_ok_and(|screen| screen == Screen::Alternate);
+        if alternate && self.term.mode(Mode::ALT_SCROLL).unwrap_or(false) {
             // Full-screen programs scroll with the arrow keys.
-            let key = if lines > 0 { b'A' } else { b'B' };
-            let prefix: &[u8] = if mode.contains(TermMode::APP_CURSOR) {
+            let prefix: &[u8] = if self.term.mode(Mode::DECCKM).unwrap_or(false) {
                 b"\x1bO"
             } else {
                 b"\x1b["
             };
-            let mut data = Vec::new();
-            for _ in 0..lines.unsigned_abs() {
-                data.extend_from_slice(prefix);
-                data.push(key);
-            }
+            let key = if lines > 0 { b'A' } else { b'B' };
+            let data = (0..lines.unsigned_abs())
+                .flat_map(|_| prefix.iter().copied().chain([key]))
+                .collect();
             self.send(data);
         } else {
-            self.term.scroll_display(Scroll::Delta(lines));
+            self.term.scroll_viewport(ScrollViewport::Delta(-lines as isize));
             cx.notify();
         }
     }
@@ -231,117 +219,139 @@ impl TerminalView {
     /// Sizes the terminal to fit bounds, with cells of cell.
     fn fit(&mut self, bounds: Bounds<Pixels>, cell: gpui::Size<Pixels>) {
         self.cell = Some(cell);
-        let cols = ((bounds.size.width / cell.width) as usize).max(2);
-        let rows = ((bounds.size.height / cell.height) as usize).max(1);
-        if cols != self.term.columns() || rows != self.term.screen_lines() {
-            self.term.resize(GridSize { cols, rows });
-            let _ = self.commands.send(Command::Resize {
-                cols: cols as u16,
-                rows: rows as u16,
-            });
+        let cols = ((bounds.size.width / cell.width) as u16).max(2);
+        let rows = ((bounds.size.height / cell.height) as u16).max(1);
+        if (Ok(cols), Ok(rows)) != (self.term.cols(), self.term.rows()) {
+            let (w, h) = (f32::from(cell.width) as u32, f32::from(cell.height) as u32);
+            if self.term.resize(cols, rows, w, h).is_ok() {
+                let _ = self.commands.send(Command::Resize { cols, rows });
+            }
         }
     }
 
     /// Shapes what's on screen, for paint.
-    fn layout(&self, bounds: Bounds<Pixels>, cell: gpui::Size<Pixels>, focused: bool, window: &mut Window) -> Layout {
-        let content = self.term.renderable_content();
-        let colors = content.colors;
-        let offset = content.display_offset as i32;
-        let cursor = content.cursor;
-        let show_cursor = content.mode.contains(TermMode::SHOW_CURSOR) && cursor.shape != CursorShape::Hidden;
-        let block_cursor = show_cursor && focused && cursor.shape == CursorShape::Block;
-        let cursor_color = theme::resolve(Color::Named(NamedColor::Cursor), colors);
-        let default_bg = theme::resolve(Color::Named(NamedColor::Background), colors);
-        let at = |row: i32, col: usize| bounds.origin + point(cell.width * col as f32, cell.height * row as f32);
+    fn layout(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        cell: gpui::Size<Pixels>,
+        focused: bool,
+        window: &mut Window,
+    ) -> ghostty_vt::error::Result<Layout> {
+        let snapshot = self.render.update(&self.term)?;
+        let colors = snapshot.colors()?;
+        let cursor = snapshot.cursor()?;
+        let default_fg = theme::to_hsla(colors.foreground);
+        let default_bg = theme::to_hsla(colors.background);
+        let cursor_color = colors.cursor.map_or(default_fg, theme::to_hsla);
+        let cursor_at = cursor.viewport.filter(|_| cursor.visible);
+        let block_cursor = focused && cursor.visual_style == CursorVisualStyle::Block;
+        let at = |row: u16, col: u16| bounds.origin + point(cell.width * f32::from(col), cell.height * f32::from(row));
 
         let mut layout = Layout {
             backgrounds: Vec::new(),
             lines: Vec::new(),
             cursor: None,
         };
-        let mut segment: Option<Segment> = None;
-        for indexed in content.display_iter {
-            let flags = indexed.cell.flags;
-            if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-                continue;
-            }
-            let row = indexed.point.line.0 + offset;
-            let col = indexed.point.column.0;
-            let width = if flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+        let mut text = String::new();
+        let mut rows = self.rows.update(&snapshot)?;
+        let mut y = 0;
+        while let Some(row) = rows.next() {
+            let mut segment: Option<Segment> = None;
+            let mut cells = self.cells.update(row)?;
+            let mut x = 0;
+            while let Some(c) = cells.next() {
+                let col = x;
+                x += 1;
+                let width = match c.raw_cell()?.wide()? {
+                    CellWide::SpacerTail | CellWide::SpacerHead => continue,
+                    CellWide::Wide => 2,
+                    _ => 1,
+                };
+                let style = c.style()?;
+                // Bold text of a normal ANSI color is drawn in its bright variant.
+                let fg = match style.fg_color {
+                    StyleColor::Palette(i) if style.bold && i.0 < 8 => Some(colors.palette[i.0 as usize + 8]),
+                    _ => c.fg_color()?,
+                };
+                let mut fg = fg.map_or(default_fg, theme::to_hsla);
+                let mut bg = c.bg_color()?.map_or(default_bg, theme::to_hsla);
+                if style.faint {
+                    fg = fg.opacity(0.66);
+                }
+                if style.inverse {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                if style.invisible {
+                    fg = bg;
+                }
+                if block_cursor && cursor_at.is_some_and(|at| (at.x, at.y) == (col, y)) {
+                    (fg, bg) = (default_bg, cursor_color);
+                }
 
-            let fg = if flags.contains(Flags::BOLD) {
-                theme::brighten(indexed.cell.fg)
-            } else {
-                indexed.cell.fg
-            };
-            let mut fg = theme::resolve(fg, colors);
-            let mut bg = theme::resolve(indexed.cell.bg, colors);
-            if flags.contains(Flags::DIM) {
-                fg = fg.opacity(0.66);
-            }
-            if flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            if flags.contains(Flags::HIDDEN) {
-                fg = bg;
-            }
-            if block_cursor && indexed.point == cursor.point {
-                (fg, bg) = (default_bg, cursor_color);
-            }
-
-            if bg != default_bg {
-                let bounds = Bounds::new(at(row, col), size(cell.width * width as f32, cell.height));
-                match layout.backgrounds.last_mut() {
-                    Some((last, color)) if *color == bg && last.top_right() == bounds.origin => {
-                        last.size.width += bounds.size.width;
+                if bg != default_bg {
+                    let bounds = Bounds::new(at(y, col), size(cell.width * width as f32, cell.height));
+                    match layout.backgrounds.last_mut() {
+                        Some((last, color)) if *color == bg && last.top_right() == bounds.origin => {
+                            last.size.width += bounds.size.width;
+                        }
+                        _ => layout.backgrounds.push((bounds, bg)),
                     }
-                    _ => layout.backgrounds.push((bounds, bg)),
                 }
-            }
 
-            let style = Style::new(fg, flags);
-            let continues = segment
-                .as_ref()
-                .is_some_and(|s| s.row == row && s.col + s.cells == col && s.style == style && width == 1 && !s.wide);
-            if !continues {
-                if let Some(done) = segment.take() {
-                    layout
-                        .lines
-                        .extend(done.shape(cell, window).map(|line| (at(done.row, done.col), line)));
+                text.clear();
+                c.graphemes_utf8(&mut text)?;
+                if text.is_empty() {
+                    text.push(' ');
                 }
-                segment = Some(Segment {
-                    row,
-                    col,
-                    cells: 0,
-                    wide: width == 2,
-                    style,
-                    text: String::new(),
-                });
+                let look = Look {
+                    fg,
+                    bold: style.bold,
+                    italic: style.italic,
+                    underline: style.underline,
+                    strike: style.strikethrough,
+                };
+                let continues = segment
+                    .as_ref()
+                    .is_some_and(|s| s.col + s.cells == col && s.look == look && width == 1 && !s.wide);
+                if !continues {
+                    if let Some(done) = segment.take() {
+                        layout
+                            .lines
+                            .extend(done.shape(cell, window).map(|line| (at(y, done.col), line)));
+                    }
+                    segment = Some(Segment {
+                        col,
+                        cells: 0,
+                        wide: width == 2,
+                        look,
+                        text: String::new(),
+                    });
+                }
+                let s = segment.as_mut().expect("a segment was just started");
+                s.text.push_str(&text);
+                s.cells += width;
             }
-            let s = segment.as_mut().expect("a segment was just started");
-            s.text.push(indexed.cell.c);
-            s.text.extend(indexed.cell.zerowidth().into_iter().flatten());
-            s.cells += width;
-        }
-        if let Some(done) = segment {
-            layout
-                .lines
-                .extend(done.shape(cell, window).map(|line| (at(done.row, done.col), line)));
+            if let Some(done) = segment {
+                layout
+                    .lines
+                    .extend(done.shape(cell, window).map(|line| (at(y, done.col), line)));
+            }
+            y += 1;
         }
 
-        let cursor_row = cursor.point.line.0 + offset;
-        if show_cursor && !block_cursor && (0..self.term.screen_lines() as i32).contains(&cursor_row) {
-            let origin = at(cursor_row, cursor.point.column.0);
-            layout.cursor = Some(match cursor.shape {
-                CursorShape::Beam => fill(Bounds::new(origin, size(px(2.), cell.height)), cursor_color),
-                CursorShape::Underline => fill(
+        if let Some(cursor_at) = cursor_at.filter(|_| !block_cursor) {
+            let origin = at(cursor_at.y, cursor_at.x);
+            layout.cursor = Some(match cursor.visual_style {
+                CursorVisualStyle::Bar => fill(Bounds::new(origin, size(px(2.), cell.height)), cursor_color),
+                CursorVisualStyle::Underline => fill(
                     Bounds::new(origin + point(px(0.), cell.height - px(2.)), size(cell.width, px(2.))),
                     cursor_color,
                 ),
                 _ => outline(Bounds::new(origin, cell), cursor_color, gpui::BorderStyle::Solid),
             });
         }
-        layout
+        snapshot.clean()?;
+        Ok(layout)
     }
 }
 
@@ -368,10 +378,16 @@ impl Render for TerminalView {
                 canvas(
                     move |bounds, window, cx| {
                         let cell = cell_size(window);
-                        view.update(cx, |view, _| view.fit(bounds, cell));
-                        view.read(cx).layout(bounds, cell, focused, window)
+                        view.update(cx, |view, _| {
+                            view.fit(bounds, cell);
+                            view.layout(bounds, cell, focused, window).ok()
+                        })
                     },
-                    move |_bounds, layout, window, cx| layout.paint(window, cx),
+                    move |_bounds, layout, window, cx| {
+                        if let Some(layout) = layout {
+                            layout.paint(window, cx);
+                        }
+                    },
                 )
                 .size_full(),
             )
@@ -423,59 +439,52 @@ impl Layout {
 
 /// How a run of cells is drawn.
 #[derive(Clone, Copy, PartialEq)]
-struct Style {
+struct Look {
     fg: Hsla,
-    flags: Flags,
-}
-
-impl Style {
-    fn new(fg: Hsla, flags: Flags) -> Self {
-        let drawn = Flags::BOLD | Flags::ITALIC | Flags::ALL_UNDERLINES | Flags::STRIKEOUT;
-        Self {
-            fg,
-            flags: flags & drawn,
-        }
-    }
+    bold: bool,
+    italic: bool,
+    underline: Underline,
+    strike: bool,
 }
 
 /// Cells next to each other on a row, drawn alike.
 struct Segment {
-    row: i32,
-    col: usize,
-    cells: usize,
+    col: u16,
+    cells: u16,
     /// A wide character, which has a segment of its own.
     wide: bool,
-    style: Style,
+    look: Look,
     text: String,
 }
 
 impl Segment {
     /// The segment shaped, unless there's nothing to draw.
     fn shape(&self, cell: gpui::Size<Pixels>, window: &mut Window) -> Option<ShapedLine> {
-        let flags = self.style.flags;
-        if self.text.trim().is_empty() && !flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT) {
+        let look = self.look;
+        let decorated = look.underline != Underline::None || look.strike;
+        if self.text.trim().is_empty() && !decorated {
             return None;
         }
         let mut font = terminal_font();
-        if flags.contains(Flags::BOLD) {
+        if look.bold {
             font.weight = FontWeight::BOLD;
         }
-        if flags.contains(Flags::ITALIC) {
+        if look.italic {
             font.style = FontStyle::Italic;
         }
         let run = TextRun {
             len: self.text.len(),
             font,
-            color: self.style.fg,
+            color: look.fg,
             background_color: None,
-            underline: flags.intersects(Flags::ALL_UNDERLINES).then_some(UnderlineStyle {
+            underline: (look.underline != Underline::None).then_some(UnderlineStyle {
                 thickness: px(1.),
-                color: Some(self.style.fg),
-                wavy: flags.contains(Flags::UNDERCURL),
+                color: Some(look.fg),
+                wavy: look.underline == Underline::Curly,
             }),
-            strikethrough: flags.contains(Flags::STRIKEOUT).then_some(StrikethroughStyle {
+            strikethrough: look.strike.then_some(StrikethroughStyle {
                 thickness: px(1.),
-                color: Some(self.style.fg),
+                color: Some(look.fg),
             }),
         };
         // Glyphs from fallback fonts are kept to the grid, but for wide characters.
@@ -485,34 +494,5 @@ impl Segment {
                 .text_system()
                 .shape_line(self.text.clone().into(), FONT_SIZE, &[run], force_width),
         )
-    }
-}
-
-/// The terminal's size, in cells.
-struct GridSize {
-    cols: usize,
-    rows: usize,
-}
-
-impl Dimensions for GridSize {
-    fn total_lines(&self) -> usize {
-        self.rows
-    }
-
-    fn screen_lines(&self) -> usize {
-        self.rows
-    }
-
-    fn columns(&self) -> usize {
-        self.cols
-    }
-}
-
-/// Collects what the terminal asks for, to be answered once the output is taken in.
-struct Listener(Rc<RefCell<Vec<TermEvent>>>);
-
-impl EventListener for Listener {
-    fn send_event(&self, event: TermEvent) {
-        self.0.borrow_mut().push(event);
     }
 }

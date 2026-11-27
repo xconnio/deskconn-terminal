@@ -32,6 +32,11 @@ jobs:
             libwayland-dev libxcb1-dev libx11-xcb-dev libvulkan-dev libfontconfig-dev \
             libfreetype-dev libzstd-dev
 
+      # Builds libghostty-vt where Ghostty has no prebuilt library.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

@@ -8,7 +8,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
-alacritty_terminal = "0.26"
+ghostty-vt = "0.9.0"
 anyhow = "1"
 base64 = "0.22"
 dirs = "6"

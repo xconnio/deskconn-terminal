@@ -1,133 +1,187 @@
-//! What the terminal sends for a key, as xterm does.
+//! What the terminal sends for a key, encoded by libghostty-vt as the terminal's modes ask:
+//! legacy xterm sequences, or the Kitty keyboard protocol.
 
-use alacritty_terminal::term::TermMode;
+use ghostty_vt::Terminal;
+use ghostty_vt::key::{Action, Encoder, Event, Key, Mods};
 use gpui::Keystroke;
 
-/// The bytes a keystroke sends to the shell, or None if it sends nothing.
-pub fn to_esc(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
-    let mods = &keystroke.modifiers;
-    // xterm's modifier parameter: 1 + shift + 2·alt + 4·ctrl.
-    let modifier = 1 + u8::from(mods.shift) + 2 * u8::from(mods.alt) + 4 * u8::from(mods.control);
-    let app_cursor = mode.contains(TermMode::APP_CURSOR);
-
-    // Cursor keys and Home/End: ESC O x in application mode, ESC [ 1;m x when modified.
-    let cursor = |c: char| -> Vec<u8> {
-        if modifier > 1 {
-            format!("\x1b[1;{modifier}{c}").into_bytes()
-        } else if app_cursor {
-            format!("\x1bO{c}").into_bytes()
-        } else {
-            format!("\x1b[{c}").into_bytes()
-        }
-    };
-    // Keys sent as ESC [ n ~, or ESC [ n;m ~ when modified.
-    let tilde = |n: u8| -> Vec<u8> {
-        if modifier > 1 {
-            format!("\x1b[{n};{modifier}~")
-        } else {
-            format!("\x1b[{n}~")
-        }
-        .into_bytes()
-    };
-    // F1 to F4: ESC O x, or ESC [ 1;m x when modified.
-    let ss3 = |c: char| -> Vec<u8> {
-        if modifier > 1 {
-            format!("\x1b[1;{modifier}{c}")
-        } else {
-            format!("\x1bO{c}")
-        }
-        .into_bytes()
-    };
-
-    let bytes = match keystroke.key.as_str() {
-        "up" => cursor('A'),
-        "down" => cursor('B'),
-        "right" => cursor('C'),
-        "left" => cursor('D'),
-        "home" => cursor('H'),
-        "end" => cursor('F'),
-        "insert" => tilde(2),
-        "delete" => tilde(3),
-        "pageup" => tilde(5),
-        "pagedown" => tilde(6),
-        "f1" => ss3('P'),
-        "f2" => ss3('Q'),
-        "f3" => ss3('R'),
-        "f4" => ss3('S'),
-        "f5" => tilde(15),
-        "f6" => tilde(17),
-        "f7" => tilde(18),
-        "f8" => tilde(19),
-        "f9" => tilde(20),
-        "f10" => tilde(21),
-        "f11" => tilde(23),
-        "f12" => tilde(24),
-        "enter" => alt_prefixed(mods.alt, b"\r"),
-        "tab" if mods.shift => b"\x1b[Z".to_vec(),
-        "tab" => alt_prefixed(mods.alt, b"\t"),
-        "escape" => alt_prefixed(mods.alt, b"\x1b"),
-        "backspace" if mods.control => alt_prefixed(mods.alt, b"\x08"),
-        "backspace" => alt_prefixed(mods.alt, b"\x7f"),
-        "space" if mods.control => alt_prefixed(mods.alt, b"\0"),
-        key if mods.control => alt_prefixed(mods.alt, &[control_char(key)?]),
-        key => {
-            // Alt+key may type nothing of its own: it's Meta and the key.
-            let text = match keystroke.key_char.as_deref() {
-                Some(text) => text,
-                None if mods.alt && key.chars().count() == 1 => key,
-                None => return None,
-            };
-            alt_prefixed(mods.alt && !mods.platform, text.as_bytes())
-        }
-    };
-    Some(bytes)
+/// Encodes the user's keys for a terminal.
+pub struct KeyEncoder {
+    encoder: Encoder,
+    event: Event,
 }
 
-/// The control character Ctrl sends with key, such as 0x03 for Ctrl+C.
-fn control_char(key: &str) -> Option<u8> {
-    let [c] = key.as_bytes() else { return None };
-    match c {
-        b'a'..=b'z' => Some(c - b'a' + 1),
-        b'@' | b'2' => Some(0),
-        b'[' | b'3' => Some(0x1b),
-        b'\\' | b'4' => Some(0x1c),
-        b']' | b'5' => Some(0x1d),
-        b'^' | b'6' => Some(0x1e),
-        b'_' | b'-' | b'7' => Some(0x1f),
-        b'?' | b'8' => Some(0x7f),
-        _ => None,
+impl KeyEncoder {
+    pub fn new() -> ghostty_vt::error::Result<Self> {
+        Ok(Self {
+            encoder: Encoder::new()?,
+            event: Event::new()?,
+        })
+    }
+
+    /// The bytes keystroke sends to the shell of terminal; empty if it sends nothing.
+    pub fn encode(&mut self, keystroke: &Keystroke, terminal: &Terminal) -> Vec<u8> {
+        let m = &keystroke.modifiers;
+        let mut mods = Mods::empty();
+        mods.set(Mods::SHIFT, m.shift);
+        mods.set(Mods::ALT, m.alt);
+        mods.set(Mods::CTRL, m.control);
+        mods.set(Mods::SUPER, m.platform);
+
+        // The text the key types, unless it's a control character: the encoder derives
+        // those from the key and the modifiers.
+        let text = keystroke
+            .key_char
+            .as_deref()
+            .filter(|text| !text.chars().any(char::is_control));
+        let unshifted = match keystroke.key.chars().collect::<Vec<_>>()[..] {
+            [c] => c,
+            _ => '\0',
+        };
+        self.event
+            .set_action(Action::Press)
+            .set_key(key(&keystroke.key))
+            .set_mods(mods)
+            .set_utf8(text)
+            .set_unshifted_codepoint(unshifted);
+
+        let mut bytes = Vec::new();
+        self.encoder.set_options_from_terminal(terminal);
+        if self.encoder.encode_to_vec(&self.event, &mut bytes).is_err() {
+            bytes.clear();
+        }
+        bytes
     }
 }
 
-/// bytes, after ESC if Alt is held, as Alt is Meta in a terminal.
-fn alt_prefixed(alt: bool, bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len() + 1);
-    if alt {
-        out.push(0x1b);
+/// The physical key GPUI names key, as a US layout has it.
+fn key(key: &str) -> Key {
+    const LETTERS: [Key; 26] = [
+        Key::A,
+        Key::B,
+        Key::C,
+        Key::D,
+        Key::E,
+        Key::F,
+        Key::G,
+        Key::H,
+        Key::I,
+        Key::J,
+        Key::K,
+        Key::L,
+        Key::M,
+        Key::N,
+        Key::O,
+        Key::P,
+        Key::Q,
+        Key::R,
+        Key::S,
+        Key::T,
+        Key::U,
+        Key::V,
+        Key::W,
+        Key::X,
+        Key::Y,
+        Key::Z,
+    ];
+    const DIGITS: [Key; 10] = [
+        Key::Digit0,
+        Key::Digit1,
+        Key::Digit2,
+        Key::Digit3,
+        Key::Digit4,
+        Key::Digit5,
+        Key::Digit6,
+        Key::Digit7,
+        Key::Digit8,
+        Key::Digit9,
+    ];
+    const FUNCTION: [Key; 12] = [
+        Key::F1,
+        Key::F2,
+        Key::F3,
+        Key::F4,
+        Key::F5,
+        Key::F6,
+        Key::F7,
+        Key::F8,
+        Key::F9,
+        Key::F10,
+        Key::F11,
+        Key::F12,
+    ];
+
+    match key {
+        "enter" => Key::Enter,
+        "tab" => Key::Tab,
+        "space" => Key::Space,
+        "backspace" => Key::Backspace,
+        "escape" => Key::Escape,
+        "delete" => Key::Delete,
+        "insert" => Key::Insert,
+        "home" => Key::Home,
+        "end" => Key::End,
+        "pageup" => Key::PageUp,
+        "pagedown" => Key::PageDown,
+        "up" => Key::ArrowUp,
+        "down" => Key::ArrowDown,
+        "left" => Key::ArrowLeft,
+        "right" => Key::ArrowRight,
+        "`" => Key::Backquote,
+        "\\" => Key::Backslash,
+        "[" => Key::BracketLeft,
+        "]" => Key::BracketRight,
+        "," => Key::Comma,
+        "=" => Key::Equal,
+        "-" => Key::Minus,
+        "." => Key::Period,
+        "'" => Key::Quote,
+        ";" => Key::Semicolon,
+        "/" => Key::Slash,
+        _ => {
+            let mut chars = key.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c @ 'a'..='z'), None) => LETTERS[c as usize - 'a' as usize],
+                (Some(c @ '0'..='9'), None) => DIGITS[c as usize - '0' as usize],
+                (Some('f'), Some(_)) => key[1..]
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|n| FUNCTION.get(n.wrapping_sub(1)).copied())
+                    .unwrap_or(Key::Unidentified),
+                _ => Key::Unidentified,
+            }
+        }
     }
-    out.extend_from_slice(bytes);
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ghostty_vt::terminal::Options;
 
-    fn esc(key: &str) -> Vec<u8> {
-        to_esc(&Keystroke::parse(key).unwrap(), TermMode::empty()).unwrap()
+    fn esc(terminal: &Terminal, key: &str) -> Vec<u8> {
+        let mut keystroke = Keystroke::parse(key).unwrap();
+        if keystroke.key.len() == 1 && !keystroke.modifiers.control && !keystroke.modifiers.alt {
+            keystroke.key_char = Some(keystroke.key.clone());
+        }
+        KeyEncoder::new().unwrap().encode(&keystroke, terminal)
     }
 
     #[test]
     fn keys() {
-        assert_eq!(esc("ctrl-c"), b"\x03");
-        assert_eq!(esc("alt-b"), b"\x1bb");
-        assert_eq!(esc("up"), b"\x1b[A");
-        assert_eq!(esc("ctrl-right"), b"\x1b[1;5C");
-        assert_eq!(esc("shift-tab"), b"\x1b[Z");
-        assert_eq!(esc("pageup"), b"\x1b[5~");
-        assert_eq!(esc("f5"), b"\x1b[15~");
-        assert_eq!(esc("backspace"), b"\x7f");
-        let up = Keystroke::parse("up").unwrap();
-        assert_eq!(to_esc(&up, TermMode::APP_CURSOR).unwrap(), b"\x1bOA");
+        let mut terminal = Terminal::new(Options::default()).unwrap();
+        assert_eq!(esc(&terminal, "a"), b"a");
+        assert_eq!(esc(&terminal, "ctrl-c"), b"\x03");
+        assert_eq!(esc(&terminal, "alt-b"), b"\x1bb");
+        assert_eq!(esc(&terminal, "enter"), b"\r");
+        assert_eq!(esc(&terminal, "backspace"), b"\x7f");
+        assert_eq!(esc(&terminal, "up"), b"\x1b[A");
+        assert_eq!(esc(&terminal, "ctrl-right"), b"\x1b[1;5C");
+        assert_eq!(esc(&terminal, "shift-tab"), b"\x1b[Z");
+        assert_eq!(esc(&terminal, "pageup"), b"\x1b[5~");
+        assert_eq!(esc(&terminal, "f5"), b"\x1b[15~");
+        // Application cursor keys, as full-screen programs turn on.
+        terminal.vt_write(b"\x1b[?1h");
+        assert_eq!(esc(&terminal, "up"), b"\x1bOA");
     }
 }

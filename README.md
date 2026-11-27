@@ -1,7 +1,7 @@
 # DeskConn Terminal
 
 A terminal for your DeskConn machines, built with [GPUI](https://www.gpui.rs) and
-[alacritty_terminal](https://crates.io/crates/alacritty_terminal).
+[libghostty-vt](https://ghostty.org) (through the [ghostty-vt](https://crates.io/crates/ghostty-vt) crate).
 
 It connects through the local deskconn daemon (`desk serve`), as the `desk` CLI does, and
 opens the machines the CLI knows about (`desk ls`). Each tab is a persistent session on its
@@ -24,6 +24,11 @@ make release  # optimized build in target/release/
     libxkbcommon-x11-dev libwayland-dev libxcb1-dev libx11-xcb-dev libvulkan-dev \
     libfontconfig-dev libfreetype-dev libzstd-dev
   ```
+
+- On Linux, and on Windows with MSVC, [Zig](https://ziglang.org/download/) 0.17, which builds
+  libghostty-vt from source (set `ZIG` if it isn't on the `PATH`). macOS and Windows GNU use
+  Ghostty's prebuilt library. Either way it's linked statically, so the app needs nothing extra
+  to run.
 
 ## Keys
 
