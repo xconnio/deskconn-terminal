@@ -46,7 +46,7 @@ const BLINK_TIMEOUT: Duration = Duration::from_secs(10);
 const PADDING: Pixels = px(8.);
 /// The scrollbar's width, within the terminal's right padding, and its thumb's least height.
 const SCROLLBAR_WIDTH: Pixels = px(6.);
-const SCROLLBAR_MIN_THUMB: Pixels = px(24.);
+const SCROLLBAR_MIN_THUMB: Pixels = px(48.);
 /// How often a selection dragged past the top or bottom scrolls a row.
 const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(50);
 
