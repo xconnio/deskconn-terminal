@@ -19,7 +19,7 @@ use gpui::{
 };
 
 use crate::terminal_view::{ClearScrollback, Copy, DecreaseFontSize, IncreaseFontSize, Paste, ResetFontSize};
-use crate::workspace::{CloseTab, NewTab, NextTab, PreviousTab, Workspace};
+use crate::workspace::{ActivateTab, CloseTab, NewTab, NextTab, PreviousTab, Workspace};
 
 /// The runtime the sessions' connections run on.
 pub fn runtime() -> &'static tokio::runtime::Runtime {
@@ -100,4 +100,15 @@ fn bind_keys(cx: &mut App) {
             KeyBinding::new("ctrl-0", ResetFontSize, Some("Terminal")),
         ]);
     }
+
+    // The first tabs by number: Alt+1 to Alt+9, and Alt+0 for the tenth; on macOS, Cmd+1 to
+    // Cmd+9, as Cmd+0 resets the font size there.
+    let (modifier, tabs) = if cfg!(target_os = "macos") {
+        ("cmd", 9)
+    } else {
+        ("alt", 10)
+    };
+    cx.bind_keys(
+        (0..tabs).map(|index| KeyBinding::new(&format!("{modifier}-{}", (index + 1) % 10), ActivateTab(index), None)),
+    );
 }

@@ -32,16 +32,22 @@ make release  # optimized build in target/release/
 
 ## Keys
 
-| Linux and Windows                    | macOS                       | Action           |
-|--------------------------------------|-----------------------------|------------------|
-| Ctrl+Shift+T                         | Cmd+T                       | New tab          |
-| Ctrl+Shift+W                         | Cmd+W                       | Close tab        |
-| Ctrl+Tab, Ctrl+Page Down             | Cmd+Shift+]                 | Next tab         |
-| Ctrl+Shift+Tab, Ctrl+Page Up         | Cmd+Shift+[                 | Previous tab     |
-| Ctrl+Shift+V, Shift+Insert           | Cmd+V                       | Paste            |
-| Ctrl+=                               | Cmd+=                       | Larger font      |
-| Ctrl+-                               | Cmd+-                       | Smaller font     |
-| Ctrl+0                               | Cmd+0                       | Default font size |
+| Linux and Windows            | macOS         | Action             |
+|------------------------------|---------------|--------------------|
+| Ctrl+Shift+T                 | Cmd+T         | New tab            |
+| Ctrl+Shift+W                 | Cmd+W         | Close tab          |
+| Ctrl+Tab, Ctrl+Page Down     | Cmd+Shift+]   | Next tab           |
+| Ctrl+Shift+Tab, Ctrl+Page Up | Cmd+Shift+[   | Previous tab       |
+| Alt+1 … Alt+9, Alt+0         | Cmd+1 … Cmd+9 | Tab 1 to 9, tab 10 |
+| Ctrl+Shift+C, Ctrl+Insert    | Cmd+C         | Copy               |
+| Ctrl+Shift+V, Shift+Insert   | Cmd+V         | Paste              |
+|                              | Cmd+K         | Clear scrollback   |
+| Ctrl+=                       | Cmd+=         | Larger font        |
+| Ctrl+-                       | Cmd+-         | Smaller font       |
+| Ctrl+0                       | Cmd+0         | Default font size  |
+
+Selecting text with the mouse offers it to a middle click on Linux, and Ctrl+click (Cmd+click on
+macOS) opens a link. A right click opens a menu to copy, paste, or clear the scrollback.
 
 `+` opens a tab on the machine of the current one; `▾` picks another machine.
 
