@@ -14,7 +14,19 @@ use crate::palette::{MachinePalette, Picked};
 use crate::terminal_view::{Closed, TerminalView};
 use crate::theme;
 
-actions!(workspace, [NewTab, NewTabOn, CloseTab, NextTab, PreviousTab, Quit]);
+actions!(
+    workspace,
+    [
+        NewTab,
+        NewTabOn,
+        CloseTab,
+        NextTab,
+        PreviousTab,
+        MoveTabLeft,
+        MoveTabRight,
+        Quit
+    ]
+);
 
 /// Switches to the tab at an index, counted from 0.
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
@@ -200,6 +212,16 @@ impl Workspace {
         if !self.tabs.is_empty() {
             self.activate((self.active + self.tabs.len() - 1) % self.tabs.len(), window, cx);
         }
+    }
+
+    fn move_tab_left(&mut self, _: &MoveTabLeft, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(to) = self.active.checked_sub(1) {
+            self.move_tab(self.active, to, window, cx);
+        }
+    }
+
+    fn move_tab_right(&mut self, _: &MoveTabRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_tab(self.active, self.active + 1, window, cx);
     }
 
     /// Ends the sessions of every tab as the window goes, as closing them would.
@@ -488,6 +510,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::activate_tab))
+            .on_action(cx.listener(Self::move_tab_left))
+            .on_action(cx.listener(Self::move_tab_right))
             .flex()
             .flex_col()
             .size_full()

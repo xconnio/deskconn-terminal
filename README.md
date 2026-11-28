@@ -32,23 +32,25 @@ make snap     # snap package, with snapcraft
 
 ## Keys
 
-| Linux                        | macOS         | Action             |
-|------------------------------|---------------|--------------------|
-| Ctrl+Shift+T                 | Cmd+T         | New tab            |
-| Ctrl+Shift+K                 | Cmd+Shift+K   | New tab on…        |
-| Ctrl+Shift+W                 | Cmd+W         | Close tab          |
-| Ctrl+Q, with no tabs open    | Cmd+Q         | Quit               |
-| Ctrl+Tab, Ctrl+Page Down     | Cmd+Shift+]   | Next tab           |
-| Ctrl+Shift+Tab, Ctrl+Page Up | Cmd+Shift+[   | Previous tab       |
-| Alt+1 … Alt+9, Alt+0         | Cmd+1 … Cmd+9 | Tab 1 to 9, tab 10 |
-| Ctrl+Shift+C, Ctrl+Insert    | Cmd+C         | Copy               |
-| Ctrl+Shift+V, Shift+Insert   | Cmd+V         | Paste              |
-| Ctrl+Shift+A                 | Cmd+A         | Select all         |
-| Ctrl+Shift+L                 | Cmd+K         | Clear              |
-| Ctrl+Shift+Alt+L             | Cmd+Alt+K     | Reset              |
-| Ctrl+=                       | Cmd+=         | Larger font        |
-| Ctrl+-                       | Cmd+-         | Smaller font       |
-| Ctrl+0                       | Cmd+0         | Default font size  |
+| Linux                        | macOS           | Action             |
+|------------------------------|-----------------|--------------------|
+| Ctrl+Shift+T                 | Cmd+T           | New tab            |
+| Ctrl+Shift+K                 | Cmd+Shift+K     | New tab on…        |
+| Ctrl+Shift+W                 | Cmd+W           | Close tab          |
+| Ctrl+Q, with no tabs open    | Cmd+Q           | Quit               |
+| Ctrl+Tab, Ctrl+Page Down     | Cmd+Shift+]     | Next tab           |
+| Ctrl+Shift+Tab, Ctrl+Page Up | Cmd+Shift+[     | Previous tab       |
+| Ctrl+Shift+Left              | Cmd+Shift+Left  | Move tab left      |
+| Ctrl+Shift+Right             | Cmd+Shift+Right | Move tab right     |
+| Alt+1 … Alt+9, Alt+0         | Cmd+1 … Cmd+9   | Tab 1 to 9, tab 10 |
+| Ctrl+Shift+C, Ctrl+Insert    | Cmd+C           | Copy               |
+| Ctrl+Shift+V, Shift+Insert   | Cmd+V           | Paste              |
+| Ctrl+Shift+A                 | Cmd+A           | Select all         |
+| Ctrl+Shift+L                 | Cmd+K           | Clear              |
+| Ctrl+Shift+Alt+L             | Cmd+Alt+K       | Reset              |
+| Ctrl+=                       | Cmd+=           | Larger font        |
+| Ctrl+-                       | Cmd+-           | Smaller font       |
+| Ctrl+0                       | Cmd+0           | Default font size  |
 
 On Linux, selected text can be pasted with a middle click. Ctrl+click (Cmd+click on macOS) opens
 a link, and a right click opens a menu to copy, paste, select all, clear, or reset.
