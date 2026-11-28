@@ -48,10 +48,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      # Lints, tests and the build all run in release mode, to share what they compile.
       - name: Lint
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --release --all-targets -- -D warnings
 
-      # In release mode, as the build after it is: the two share what they compile.
       - name: Test
         run: cargo test --locked --release
 
