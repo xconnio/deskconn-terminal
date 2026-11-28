@@ -25,14 +25,13 @@ make release  # optimized build in target/release/
     libfontconfig-dev libfreetype-dev libzstd-dev
   ```
 
-- On Linux, and on Windows with MSVC, [Zig](https://ziglang.org/download/) 0.17, which builds
-  libghostty-vt from source (set `ZIG` if it isn't on the `PATH`). macOS and Windows GNU use
-  Ghostty's prebuilt library. Either way it's linked statically, so the app needs nothing extra
-  to run.
+- On Linux, [Zig](https://ziglang.org/download/) 0.17, which builds libghostty-vt from source
+  (set `ZIG` if it isn't on the `PATH`). macOS uses Ghostty's prebuilt library. Either way it's
+  linked statically, so the app needs nothing extra to run.
 
 ## Keys
 
-| Linux and Windows            | macOS         | Action             |
+| Linux                        | macOS         | Action             |
 |------------------------------|---------------|--------------------|
 | Ctrl+Shift+T                 | Cmd+T         | New tab            |
 | Ctrl+Shift+K                 | Cmd+Shift+K   | New tab on…        |

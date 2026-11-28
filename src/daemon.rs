@@ -1,7 +1,6 @@
 //! The local deskconn daemon (`desk serve`), and the machines the CLI knows about.
 //!
-//! The daemon serves the CLI's realm on `~/.deskconn/deskconn.sock`, or on Windows on loopback,
-//! as that file says. Its stream proxy opens a
+//! The daemon serves the CLI's realm on `~/.deskconn/deskconn.sock`. Its stream proxy opens a
 //! feature's stream to a machine on the daemon's persistent connection to it.
 
 use std::path::{Path, PathBuf};
@@ -9,10 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use xconn::Value;
-#[cfg(not(windows))]
 use xconn::async_::client::connect_anonymous;
-#[cfg(windows)]
-use xconn::async_::client::connect_wampcra;
 use xconn::async_::rawsocket::BoxStream;
 use xconn::async_::session::Session;
 
@@ -83,34 +79,14 @@ pub struct Daemon {
 impl Daemon {
     pub async fn connect(dir: &Path) -> Result<Self> {
         let socket = dir.join("deskconn.sock");
-        #[cfg(not(windows))]
-        let session = connect_anonymous(&format!("unix+yamux://{}", socket.display()), LOCAL_REALM).await;
-        // Windows has no Unix sockets for the daemon, which serves on loopback instead, for those
-        // with the secret in its endpoint file, in place of the socket.
-        #[cfg(windows)]
-        let session = {
-            #[derive(Deserialize)]
-            struct Endpoint {
-                address: String,
-                secret: String,
-            }
-            let data = std::fs::read_to_string(&socket)
-                .context("read the deskconn daemon's endpoint (is `desk serve` running?)")?;
-            let endpoint: Endpoint = serde_json::from_str(&data).context("read the deskconn daemon's endpoint")?;
-            connect_wampcra(
-                &format!("yamux://{}", endpoint.address),
-                LOCAL_REALM,
-                "local",
-                &endpoint.secret,
-            )
+        let session = connect_anonymous(&format!("unix+yamux://{}", socket.display()), LOCAL_REALM)
             .await
-        };
-        let session = session.map_err(|e| {
-            anyhow!(
-                "connect to the deskconn daemon (is `desk serve` running?): {}",
-                e.message
-            )
-        })?;
+            .map_err(|e| {
+                anyhow!(
+                    "connect to the deskconn daemon (is `desk serve` running?): {}",
+                    e.message
+                )
+            })?;
         Ok(Self { session })
     }
 
