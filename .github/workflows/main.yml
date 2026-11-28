@@ -15,28 +15,26 @@ defaults:
   run:
     shell: bash
 
+# A newer push to a pull request supersedes its runs in progress; runs on main all finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
-  build:
-    name: Build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
 
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y clang cmake pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
             libwayland-dev libxcb1-dev libx11-xcb-dev libvulkan-dev libfontconfig-dev \
             libfreetype-dev libzstd-dev
 
-      # Builds libghostty-vt where Ghostty has no prebuilt library.
+      # Builds libghostty-vt, for which Ghostty has no prebuilt library on Linux.
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
@@ -48,7 +46,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        if: runner.os == 'Linux'
         run: cargo fmt --check
 
       - name: Lint
@@ -58,20 +55,38 @@ jobs:
         run: cargo test --locked
 
       - name: Build
-        run: cargo build --locked --release
-
-      # Executables named for what they run on, as the release has them side by side.
-      - name: Name the executable
         run: |
+          cargo build --locked --release
           mkdir dist
-          case "$RUNNER_OS" in
-            Linux) cp target/release/deskconn-terminal dist/deskconn-terminal-linux-x86_64 ;;
-            macOS) cp target/release/deskconn-terminal dist/deskconn-terminal-macos-arm64 ;;
-          esac
+          cp target/release/deskconn-terminal dist/deskconn-terminal-linux-x86_64
 
       - uses: actions/upload-artifact@v4
         with:
-          name: deskconn-terminal-${{ matrix.os }}
+          name: deskconn-terminal-linux
+          retention-days: 90
+          path: dist/*
+
+  # The code is the same on macOS, whose minutes cost ten times Linux's: it's only built there,
+  # while formatting, lints and tests run on Linux.
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: |
+          cargo build --locked --release
+          mkdir dist
+          cp target/release/deskconn-terminal dist/deskconn-terminal-macos-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deskconn-terminal-macos
           retention-days: 90
           path: dist/*
 
@@ -79,7 +94,7 @@ jobs:
   # after merging a "Prepare release" pull request (or any other version bump).
   release:
     if: github.event_name == 'push'
-    needs: build
+    needs: [linux, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
