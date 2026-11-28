@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     name: Build (${{ matrix.os }})
@@ -56,10 +60,60 @@ jobs:
       - name: Build
         run: cargo build --locked --release
 
+      # Executables named for what they run on, as the release has them side by side.
+      - name: Name the executable
+        run: |
+          mkdir dist
+          case "$RUNNER_OS" in
+            Linux) cp target/release/deskconn-terminal dist/deskconn-terminal-linux-x86_64 ;;
+            macOS) cp target/release/deskconn-terminal dist/deskconn-terminal-macos-arm64 ;;
+            Windows) cp target/release/deskconn-terminal.exe dist/deskconn-terminal-windows-x86_64.exe ;;
+          esac
+
       - uses: actions/upload-artifact@v4
         with:
           name: deskconn-terminal-${{ matrix.os }}
           retention-days: 90
-          path: |
-            target/release/deskconn-terminal
-            target/release/deskconn-terminal.exe
+          path: dist/*
+
+  # Releases Cargo.toml's version once it lands on main without a tag yet, i.e.
+  # after merging a "Prepare release" pull request (or any other version bump).
+  release:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check for an unreleased version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already released"
+          else
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.version.outputs.version
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deskconn-terminal-*
+          path: release
+          merge-multiple: true
+
+      - name: Publish release
+        if: steps.version.outputs.version
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sha256sum * > SHA256SUMS
+          gh release create "v$VERSION" * --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "DeskConn Terminal v$VERSION" --generate-notes

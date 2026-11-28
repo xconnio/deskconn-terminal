@@ -249,6 +249,12 @@ impl TerminalView {
                 Event::Output(data) => self.term.vt_write(&data),
                 Event::Reconnecting => self.notice("Connection lost; reconnecting…"),
                 Event::Reconnected => {}
+                Event::OutputLost => {
+                    self.notice("Some output while disconnected is no longer kept.");
+                    // The snapshot clears the screen: what's on it goes to the scrollback first.
+                    let rows = self.term.rows().unwrap_or(0);
+                    self.term.vt_write("\r\n".repeat(rows.into()).as_bytes());
+                }
                 Event::Exited(_) => {
                     cx.emit(Closed);
                     return;

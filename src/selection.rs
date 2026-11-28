@@ -140,6 +140,7 @@ fn hyperlink(term: &Terminal, cell: PointCoordinate) -> Option<Vec<u8>> {
 /// The OSC 8 hyperlink at cell, across the cells of its row that share it.
 fn hyperlink_at(term: &Terminal, cell: PointCoordinate) -> Option<Link> {
     let uri = hyperlink(term, cell)?;
+    let url = String::from_utf8(uri.clone()).ok().filter(|url| links::opens(url))?;
     let shares = |x| hyperlink(term, PointCoordinate { x, y: cell.y }).as_ref() == Some(&uri);
     let cols = term.cols().ok()?;
     let (mut start, mut end) = (cell.x, cell.x);
@@ -150,7 +151,7 @@ fn hyperlink_at(term: &Terminal, cell: PointCoordinate) -> Option<Link> {
         end += 1;
     }
     Some(Link {
-        url: String::from_utf8_lossy(&uri).into_owned(),
+        url,
         start: PointCoordinate { x: start, y: cell.y },
         end: PointCoordinate { x: end, y: cell.y },
     })

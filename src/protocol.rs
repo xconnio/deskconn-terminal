@@ -65,6 +65,8 @@ pub const OP_DISPLACED: &str = "displaced";
 pub const ERR_NOT_FOUND: &str = "not_found";
 /// A refusal's code for a session the machine can't reach right now.
 pub const ERR_UNAVAILABLE: &str = "unavailable";
+/// A refusal's code for a session attached elsewhere, which this client may not take over.
+pub const ERR_ATTACHED: &str = "attached";
 
 /// One message read from the stream.
 pub enum Message {

@@ -37,11 +37,14 @@ pub fn register() -> Result<()> {
 
 /// Quotes path for a desktop entry's Exec key: in double quotes, with the characters special
 /// there escaped, and the backslashes of those escapes escaped again, as the key's a string.
+/// A percent sign doubles, as it starts a field code.
 fn exec_quote(path: &str) -> String {
     let mut quoted = String::from("\"");
     for c in path.chars() {
-        if matches!(c, '"' | '`' | '$' | '\\') {
-            quoted.push_str("\\\\");
+        match c {
+            '"' | '`' | '$' | '\\' => quoted.push_str("\\\\"),
+            '%' => quoted.push('%'),
+            _ => {}
         }
         quoted.push(c);
     }
@@ -69,5 +72,6 @@ mod tests {
             r#""/home/me/deskconn-terminal""#
         );
         assert_eq!(exec_quote("/home/me/my $apps/x"), r#""/home/me/my \\$apps/x""#);
+        assert_eq!(exec_quote("/home/me/100%/x"), r#""/home/me/100%%/x""#);
     }
 }
