@@ -60,6 +60,8 @@ pub struct Workspace {
     focus: FocusHandle,
     /// Whether the mouse was pressed on the titlebar, to move the window if it's dragged.
     dragging: bool,
+    /// The sessions of the tabs closed, as they end.
+    ending: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Workspace {
@@ -74,6 +76,7 @@ impl Workspace {
             error: None,
             focus: cx.focus_handle(),
             dragging: false,
+            ending: Vec::new(),
         };
         match daemon::config_dir() {
             Ok(dir) => {
@@ -136,7 +139,8 @@ impl Workspace {
     /// Closes a tab, ending its session.
     fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.tabs.get(index).cloned() {
-            view.update(cx, |view, _| view.terminate());
+            self.ending.retain(|session| !session.is_finished());
+            self.ending.extend(view.update(cx, |view, _| view.terminate()));
             self.remove(&view, window, cx);
         }
     }
@@ -147,9 +151,9 @@ impl Workspace {
             return;
         };
         self.tabs.remove(index);
+        // The last tab closing ends the app, as in other terminals.
         if self.tabs.is_empty() {
-            self.focus.focus(window, cx);
-            cx.notify();
+            window.remove_window();
             return;
         }
         let active = if index < self.active || self.active == self.tabs.len() {
@@ -224,13 +228,15 @@ impl Workspace {
         self.move_tab(self.active, self.active + 1, window, cx);
     }
 
-    /// Ends the sessions of every tab as the window goes, as closing them would.
+    /// Ends the sessions of every tab as the window goes, as closing them would, and waits for
+    /// those of the tabs closed.
     fn end_sessions(&mut self, cx: &mut App) {
-        let ended: Vec<_> = self
-            .tabs
-            .iter()
-            .filter_map(|view| view.update(cx, |view, _| view.terminate()))
-            .collect();
+        let mut ended = std::mem::take(&mut self.ending);
+        ended.extend(
+            self.tabs
+                .iter()
+                .filter_map(|view| view.update(cx, |view, _| view.terminate())),
+        );
         // The app may be about to exit, so wait here for the daemon to hear of it.
         crate::runtime().block_on(async {
             let _ = tokio::time::timeout(QUIT_TIMEOUT, futures::future::join_all(ended)).await;
