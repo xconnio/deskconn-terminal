@@ -1,6 +1,6 @@
 [package]
 name = "deskconn-terminal"
-version = "0.2.0"
+version = "0.3.0"
 description = "Standalone terminal for your DeskConn machines"
 authors = ["XConnIO <info@xconn.io>"]
 edition = "2024"
