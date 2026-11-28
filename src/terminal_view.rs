@@ -37,6 +37,7 @@ actions!(
     [
         Copy,
         Paste,
+        SelectAll,
         Clear,
         Reset,
         IncreaseFontSize,
@@ -315,6 +316,19 @@ impl TerminalView {
         }
     }
 
+    /// Selects all there is, the scrollback with the screen, to copy; on Linux it's offered for a
+    /// middle click to paste, as any selection is.
+    fn select_all(&mut self, _: &SelectAll, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Ok(Some(all)) = self.term.select_all() {
+            let _ = self.term.set_selection(Some(&all));
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(text) = selection::text(&self.term) {
+            cx.write_to_primary(ClipboardItem::new_string(text));
+        }
+        cx.notify();
+    }
+
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.paste_text(text, window, cx);
@@ -382,6 +396,7 @@ impl TerminalView {
         };
         let copy = item("copy", "Copy", shortcut(&Copy), menu.can_copy);
         let paste = item("paste", "Paste", shortcut(&Paste), true);
+        let select_all = item("select-all", "Select All", shortcut(&SelectAll), true);
         let clear = item("clear", "Clear", shortcut(&Clear), true);
         let reset = item("reset", "Reset", shortcut(&Reset), true);
         deferred(
@@ -412,6 +427,10 @@ impl TerminalView {
                         .child(paste.on_click(cx.listener(|view, _, window, cx| {
                             view.menu = None;
                             view.paste(&Paste, window, cx);
+                        })))
+                        .child(select_all.on_click(cx.listener(|view, _, window, cx| {
+                            view.menu = None;
+                            view.select_all(&SelectAll, window, cx);
                         })))
                         .child(div().my_1().h(px(1.)).bg(theme::border()))
                         .child(clear.on_click(cx.listener(|view, _, window, cx| {
@@ -988,6 +1007,7 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::clear))
             .on_action(cx.listener(Self::reset))
             .on_modifiers_changed(cx.listener(|view, event: &ModifiersChangedEvent, window, cx| {

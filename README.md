@@ -43,6 +43,7 @@ make release  # optimized build in target/release/
 | Alt+1 … Alt+9, Alt+0         | Cmd+1 … Cmd+9 | Tab 1 to 9, tab 10 |
 | Ctrl+Shift+C, Ctrl+Insert    | Cmd+C         | Copy               |
 | Ctrl+Shift+V, Shift+Insert   | Cmd+V         | Paste              |
+| Ctrl+Shift+A                 | Cmd+A         | Select all         |
 | Ctrl+Shift+L                 | Cmd+K         | Clear              |
 | Ctrl+Shift+Alt+L             | Cmd+Alt+K     | Reset              |
 | Ctrl+=                       | Cmd+=         | Larger font        |
@@ -50,7 +51,7 @@ make release  # optimized build in target/release/
 | Ctrl+0                       | Cmd+0         | Default font size  |
 
 Selecting text with the mouse offers it to a middle click on Linux, and Ctrl+click (Cmd+click on
-macOS) opens a link. A right click opens a menu to copy, paste, clear, or reset.
+macOS) opens a link. A right click opens a menu to copy, paste, select all, clear, or reset.
 
 Programs that take the mouse, such as Claude Code, Codex, vim, or htop, get its wheel, clicks, and
 drags; holding Shift keeps them for the terminal, to select text or open the menu.
