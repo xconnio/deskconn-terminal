@@ -12,6 +12,7 @@ make run      # build and run
 make test     # unit tests
 make check    # formatting and lints
 make release  # optimized build in target/release/
+make snap     # snap package, with snapcraft
 ```
 
 ## Requirements
@@ -70,7 +71,10 @@ applied through `[patch.crates-io]` until GPUI moves on.
 The terminal font, [JetBrains Mono](https://www.jetbrains.com/lp/mono/), is bundled from
 `assets/fonts` under the SIL Open Font License (`assets/fonts/OFL.txt`).
 
-On Linux, the app registers itself with the desktop on startup. It writes an entry to
+The snap needs access to the `desk` CLI's configuration and daemon in `~/.deskconn`, which it's
+given with `sudo snap connect deskconn-terminal:deskconn`.
+
+On Linux, the app registers itself with the desktop on startup, unless it's a snap. It writes an entry to
 `~/.local/share/applications` and its icon to `~/.local/share/icons`, both named after its app ID,
 `io.xconn.deskconn.terminal`. The desktop needs these to show the window's icon, and the entry
 launches the executable from wherever it was last run.

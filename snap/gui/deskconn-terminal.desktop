@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=DeskConn Terminal
+Comment=Terminals on your machines
+Exec=deskconn-terminal
+Icon=${SNAP}/meta/gui/icon.png
+StartupWMClass=io.xconn.deskconn.terminal
+Categories=System;TerminalEmulator;

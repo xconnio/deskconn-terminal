@@ -33,9 +33,14 @@ impl Machine {
     }
 }
 
-/// The CLI's configuration directory.
+/// The CLI's configuration directory. A snap has a home of its own, so there it's in the user's
+/// real home.
 pub fn config_dir() -> Result<PathBuf> {
-    Ok(dirs::home_dir().context("no home directory")?.join(".deskconn"))
+    let home = std::env::var_os("SNAP_REAL_HOME")
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .context("no home directory")?;
+    Ok(home.join(".deskconn"))
 }
 
 /// The machines the CLI lists, as `desk ls` last saved them, with this machine first.
