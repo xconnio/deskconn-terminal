@@ -26,3 +26,9 @@ zeroize = "1"
 # zed-async-tar (through GPUI) needs xattr 0.2, which no longer builds with current libc.
 [patch.crates-io]
 xattr = { path = "vendor/xattr" }
+
+# Smaller and a little faster, for slower builds.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
