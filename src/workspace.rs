@@ -100,6 +100,16 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Moves the tab at from to to, and switches to it.
+    fn move_tab(&mut self, from: usize, to: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.activate(to, window, cx);
+    }
+
     /// Closes a tab, ending its session.
     fn close(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.tabs.get(index).cloned() {
@@ -286,8 +296,13 @@ impl Workspace {
                     }))
                     .when(self.menu, |button| button.child(self.render_menu(cx))),
             )
-            // Room to drag the window by, however many tabs there are.
-            .child(div().flex_1().min_w(px(48.)))
+            // Room to drag the window by, however many tabs there are; a tab dropped here goes last.
+            .child(div().flex_1().min_w(px(48.)).h_full().on_drop(cx.listener(
+                |this, dragged: &DraggedTab, window, cx| {
+                    let last = this.tabs.len().saturating_sub(1);
+                    this.move_tab(dragged.index, last, window, cx)
+                },
+            )))
             .when(!mac, |bar| bar.child(window_controls(tiling, window)))
     }
 
@@ -317,6 +332,26 @@ impl Workspace {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| this.activate(index, window, cx)))
+            .on_drag(
+                DraggedTab {
+                    index,
+                    label: label.clone(),
+                },
+                |tab, _, _, cx| cx.new(|_| tab.clone()),
+            )
+            // A line on the side the dragged tab would go.
+            .drag_over::<DraggedTab>(move |style, dragged, _, _| {
+                if dragged.index > index {
+                    style.border_l_2().border_color(theme::foreground())
+                } else if dragged.index < index {
+                    style.border_r_2().border_color(theme::foreground())
+                } else {
+                    style
+                }
+            })
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, window, cx| {
+                this.move_tab(dragged.index, index, window, cx)
+            }))
             .on_mouse_up(
                 MouseButton::Middle,
                 cx.listener(move |this, _, window, cx| this.close(index, window, cx)),
@@ -504,6 +539,33 @@ fn rounded<E: Styled + FluentBuilder>(element: E, tiling: Tiling, top: bool, bot
         .when(top && !tiling.top && !tiling.right, |e| e.rounded_tr(ROUNDING))
         .when(bottom && !tiling.bottom && !tiling.left, |e| e.rounded_bl(ROUNDING))
         .when(bottom && !tiling.bottom && !tiling.right, |e| e.rounded_br(ROUNDING))
+}
+
+/// A tab being dragged to another place among the tabs, drawn as it goes.
+#[derive(Clone)]
+struct DraggedTab {
+    index: usize,
+    label: SharedString,
+}
+
+impl Render for DraggedTab {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .h(px(32.))
+            .max_w(px(240.))
+            .px_3()
+            .rounded_md()
+            .bg(theme::tab_active())
+            .border_1()
+            .border_color(theme::border())
+            .shadow_lg()
+            .font_family(".SystemUIFont")
+            .text_sm()
+            .text_color(theme::foreground())
+            .child(div().truncate().child(self.label.clone()))
+    }
 }
 
 /// A small titlebar button.
