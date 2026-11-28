@@ -23,7 +23,9 @@ use gpui::{
 };
 
 use crate::terminal_view::{Clear, Copy, DecreaseFontSize, IncreaseFontSize, Paste, Reset, ResetFontSize, SelectAll};
-use crate::workspace::{ActivateTab, CloseTab, NewTab, NewTabOn, NextTab, PreviousTab, Quit, Workspace};
+use crate::workspace::{
+    ActivateTab, CloseTab, MoveTabLeft, MoveTabRight, NewTab, NewTabOn, NextTab, PreviousTab, Quit, Workspace,
+};
 
 /// The window's app ID, by which a desktop knows the app, and finds its icon.
 const APP_ID: &str = "io.xconn.deskconn.terminal";
@@ -86,6 +88,8 @@ fn bind_keys(cx: &mut App) {
             KeyBinding::new("cmd-w", CloseTab, None),
             KeyBinding::new("cmd-shift-]", NextTab, None),
             KeyBinding::new("cmd-shift-[", PreviousTab, None),
+            KeyBinding::new("cmd-shift-left", MoveTabLeft, None),
+            KeyBinding::new("cmd-shift-right", MoveTabRight, None),
             KeyBinding::new("cmd-c", Copy, Some("Terminal")),
             KeyBinding::new("cmd-k", Clear, Some("Terminal")),
             KeyBinding::new("cmd-alt-k", Reset, Some("Terminal")),
@@ -107,6 +111,8 @@ fn bind_keys(cx: &mut App) {
             KeyBinding::new("ctrl-pageup", PreviousTab, None),
             KeyBinding::new("ctrl-tab", NextTab, None),
             KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
+            KeyBinding::new("ctrl-shift-left", MoveTabLeft, None),
+            KeyBinding::new("ctrl-shift-right", MoveTabRight, None),
             // The later bindings of an action are the ones menus show.
             KeyBinding::new("ctrl-insert", Copy, Some("Terminal")),
             KeyBinding::new("shift-insert", Paste, Some("Terminal")),
