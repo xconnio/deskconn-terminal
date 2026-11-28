@@ -22,6 +22,8 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a lost connection is tried again.
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const RETRY_MAX: Duration = Duration::from_secs(5);
+/// The most input one frame carries, well within the machine's limit on a frame.
+const INPUT_MAX: usize = 32 * 1024;
 
 /// What a session tells its tab.
 #[derive(Debug)]
@@ -32,6 +34,9 @@ pub enum Event {
     Reconnecting,
     /// The connection is back.
     Reconnected,
+    /// Output missed while the connection was lost is no longer kept on the machine; the
+    /// screen is restored without it.
+    OutputLost,
     /// The shell exited, with its status, or the tab ended the session. The tab closes
     /// either way.
     #[allow(dead_code)]
@@ -71,11 +76,21 @@ pub async fn run(
         id: String::new(),
         token: String::new(),
     };
-    let end = match session.run(&mut commands, &events).await {
-        Ok(end) => end,
-        Err(err) => Event::Failed(format!("{err:#}")),
-    };
-    let _ = events.send(end);
+    match session.run(&mut commands, &events).await {
+        Ok(end) => {
+            let _ = events.send(end);
+        }
+        Err(err) => {
+            let _ = events.send(Event::Failed(format!("{err:#}")));
+            // The session may still run on the machine: it's ended once the tab is closed.
+            while let Some(command) = commands.recv().await {
+                if let Command::Terminate = command {
+                    break;
+                }
+            }
+            session.terminate().await;
+        }
+    }
 }
 
 struct Session {
@@ -118,8 +133,8 @@ impl Session {
             };
             let _ = events.send(Event::Reconnecting);
             attachment = match self.reconnect(seen, commands).await? {
-                Some(attachment) => attachment,
-                None => return Ok(Event::Exited(0)),
+                Ok(attachment) => attachment,
+                Err(end) => return Ok(end),
             };
             let _ = events.send(Event::Reconnected);
             restore = true;
@@ -152,6 +167,9 @@ impl Session {
         let mut seen = attachment.reply.offset;
         let mut snapshot = attachment.reply.snapshot;
         let mut ping = tokio::time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
+        if restore && attachment.reply.history_gap {
+            let _ = events.send(Event::OutputLost);
+        }
         loop {
             let sent = tokio::select! {
                 message = attachment.messages.recv() => match message {
@@ -174,7 +192,7 @@ impl Session {
                     None => Err(anyhow!("the connection closed")),
                 },
                 command = commands.recv() => match command {
-                    Some(Command::Input(data)) => attachment.send_data(&data).await,
+                    Some(Command::Input(data)) => attachment.send_input(&data).await,
                     Some(Command::Resize { cols, rows }) => {
                         (self.cols, self.rows) = (cols, rows);
                         attachment
@@ -197,14 +215,14 @@ impl Session {
         }
     }
 
-    /// Attaches to the session again, until it's attached, the tab ends it (None), it's
-    /// refused, or the time for it runs out. Input meanwhile is dropped: the session might
-    /// not get it.
+    /// Attaches to the session again, until it's attached, it ends for the tab (Ok(Err), with
+    /// how: the tab ended it, or another client took it over), it's refused, or the time for
+    /// it runs out. Input meanwhile is dropped: the session might not get it.
     async fn reconnect(
         &mut self,
         seen: u64,
         commands: &mut mpsc::UnboundedReceiver<Command>,
-    ) -> Result<Option<Attachment>> {
+    ) -> Result<Result<Attachment, Event>> {
         let deadline = Instant::now() + RECONNECT_TIMEOUT;
         let mut wait = Duration::from_millis(250);
         loop {
@@ -216,11 +234,15 @@ impl Session {
                 ..Default::default()
             };
             let err = match self.attach(req).await {
-                Ok(attachment) => return Ok(Some(attachment)),
+                Ok(attachment) => return Ok(Ok(attachment)),
                 Err(err) => err,
             };
             match err.downcast_ref::<Refused>() {
-                Some(refused) if refused.code == protocol::ERR_NOT_FOUND => bail!("the session has ended"),
+                Some(refused) if refused.code == protocol::ERR_NOT_FOUND => {
+                    self.id.clear();
+                    bail!("the session has ended");
+                }
+                Some(refused) if refused.code == protocol::ERR_ATTACHED => return Ok(Err(Event::Displaced)),
                 Some(refused) if refused.code != protocol::ERR_UNAVAILABLE => return Err(err),
                 _ => {}
             }
@@ -237,7 +259,7 @@ impl Session {
                         Some(Command::Input(_)) => {}
                         Some(Command::Terminate) | None => {
                             self.terminate().await;
-                            return Ok(None);
+                            return Ok(Err(Event::Exited(0)));
                         }
                     },
                 }
@@ -309,8 +331,11 @@ async fn request(dir: &std::path::Path, realm: &str, req: &ControlMsg) -> Result
 }
 
 impl Attachment {
-    async fn send_data(&mut self, data: &[u8]) -> Result<()> {
-        protocol::write_frame(&mut self.writer, &self.keys.seal(protocol::KIND_DATA, data)?).await
+    async fn send_input(&mut self, data: &[u8]) -> Result<()> {
+        for chunk in data.chunks(INPUT_MAX) {
+            protocol::write_frame(&mut self.writer, &self.keys.seal(protocol::KIND_DATA, chunk)?).await?;
+        }
+        Ok(())
     }
 
     async fn send_control(&mut self, msg: ControlMsg) -> Result<()> {

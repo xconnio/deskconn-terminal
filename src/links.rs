@@ -7,6 +7,15 @@ pub const BOUNDARIES: &[char] = &[' ', '\t', '"', '\'', '`', '<', '>', '│'];
 
 const SCHEMES: &[&str] = &["https://", "http://", "file://", "ftp://", "mailto:"];
 
+/// Whether url has a scheme a click may open: links of other schemes can launch any app that
+/// handles them, from a link whose text shows something else.
+pub fn opens(url: &str) -> bool {
+    SCHEMES.iter().any(|scheme| {
+        url.get(..scheme.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(scheme))
+    })
+}
+
 /// Where in word, a run of text without whitespace, there's a URL.
 ///
 /// Punctuation after a URL ends the sentence rather than the URL, and a closing bracket ends it
@@ -55,5 +64,14 @@ mod tests {
         assert_eq!(url("mailto:hello@xconn.io"), Some("mailto:hello@xconn.io"));
         assert_eq!(url("https://"), None);
         assert_eq!(url("xconn.io"), None);
+    }
+
+    #[test]
+    fn schemes() {
+        assert!(opens("https://xconn.io"));
+        assert!(opens("HTTPS://xconn.io"));
+        assert!(opens("file:///home/me/notes.txt"));
+        assert!(!opens("vscode://file/home/me/notes.txt"));
+        assert!(!opens("ht"));
     }
 }

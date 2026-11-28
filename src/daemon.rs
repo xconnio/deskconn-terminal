@@ -1,6 +1,7 @@
 //! The local deskconn daemon (`desk serve`), and the machines the CLI knows about.
 //!
-//! The daemon serves the CLI's realm on `~/.deskconn/deskconn.sock`. Its stream proxy opens a
+//! The daemon serves the CLI's realm on `~/.deskconn/deskconn.sock`, or on Windows on loopback,
+//! as that file says. Its stream proxy opens a
 //! feature's stream to a machine on the daemon's persistent connection to it.
 
 use std::path::{Path, PathBuf};
@@ -8,7 +9,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use xconn::Value;
+#[cfg(not(windows))]
 use xconn::async_::client::connect_anonymous;
+#[cfg(windows)]
+use xconn::async_::client::connect_wampcra;
 use xconn::async_::rawsocket::BoxStream;
 use xconn::async_::session::Session;
 
@@ -51,16 +55,22 @@ pub fn machines(dir: &Path) -> Result<Vec<Machine>> {
     }
 
     let path = dir.join("config.yml");
-    let config: Config =
-        serde_yaml_ng::from_str(&std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?)?;
-    let mut machines = config.machines;
+    // None yet, until `desk ls` lists them.
+    let data = match std::fs::read_to_string(&path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        data => data.with_context(|| format!("read {}", path.display()))?,
+    };
+    let config: Config = serde_yaml_ng::from_str(&data).with_context(|| format!("read {}", path.display()))?;
+    let mut machines: Vec<_> = config.machines.into_iter().filter(|m| !m.realm.is_empty()).collect();
     // This machine's own credentials, if it's attached.
-    if let Ok(data) = std::fs::read_to_string(dir.join("credentials.json")) {
-        let own: Credentials = serde_json::from_str(&data)?;
-        if let Some(i) = machines.iter().position(|m| m.authid == own.authid) {
-            let machine = machines.remove(i);
-            machines.insert(0, machine);
-        }
+    let own = std::fs::read_to_string(dir.join("credentials.json"))
+        .ok()
+        .and_then(|data| serde_json::from_str::<Credentials>(&data).ok());
+    if let Some(own) = own
+        && let Some(i) = machines.iter().position(|m| m.authid == own.authid)
+    {
+        let machine = machines.remove(i);
+        machines.insert(0, machine);
     }
     Ok(machines)
 }
@@ -73,14 +83,34 @@ pub struct Daemon {
 impl Daemon {
     pub async fn connect(dir: &Path) -> Result<Self> {
         let socket = dir.join("deskconn.sock");
-        let session = connect_anonymous(&format!("unix+yamux://{}", socket.display()), LOCAL_REALM)
+        #[cfg(not(windows))]
+        let session = connect_anonymous(&format!("unix+yamux://{}", socket.display()), LOCAL_REALM).await;
+        // Windows has no Unix sockets for the daemon, which serves on loopback instead, for those
+        // with the secret in its endpoint file, in place of the socket.
+        #[cfg(windows)]
+        let session = {
+            #[derive(Deserialize)]
+            struct Endpoint {
+                address: String,
+                secret: String,
+            }
+            let data = std::fs::read_to_string(&socket)
+                .context("read the deskconn daemon's endpoint (is `desk serve` running?)")?;
+            let endpoint: Endpoint = serde_json::from_str(&data).context("read the deskconn daemon's endpoint")?;
+            connect_wampcra(
+                &format!("yamux://{}", endpoint.address),
+                LOCAL_REALM,
+                "local",
+                &endpoint.secret,
+            )
             .await
-            .map_err(|e| {
-                anyhow!(
-                    "connect to the deskconn daemon (is `desk serve` running?): {}",
-                    e.message
-                )
-            })?;
+        };
+        let session = session.map_err(|e| {
+            anyhow!(
+                "connect to the deskconn daemon (is `desk serve` running?): {}",
+                e.message
+            )
+        })?;
         Ok(Self { session })
     }
 

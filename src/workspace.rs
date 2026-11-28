@@ -63,10 +63,10 @@ impl Workspace {
             focus: cx.focus_handle(),
             dragging: false,
         };
-        match daemon::config_dir().and_then(|dir| Ok((daemon::machines(&dir)?, dir))) {
-            Ok((machines, dir)) => {
+        match daemon::config_dir() {
+            Ok(dir) => {
                 workspace.dir = dir;
-                workspace.machines = machines;
+                workspace.load_machines();
             }
             Err(err) => workspace.error = Some(format!("{err:#}")),
         }
@@ -77,6 +77,17 @@ impl Workspace {
         }
         cx.on_release(Self::end_sessions).detach();
         workspace
+    }
+
+    /// Lists the machines again, as `desk ls` may have since.
+    fn load_machines(&mut self) {
+        match daemon::machines(&self.dir) {
+            Ok(machines) => {
+                self.machines = machines;
+                self.error = None;
+            }
+            Err(err) => self.error = Some(format!("{err:#}")),
+        }
     }
 
     fn open(&mut self, machine: Machine, window: &mut Window, cx: &mut Context<Self>) {
@@ -153,9 +164,7 @@ impl Workspace {
 
     /// Opens the palette to pick the machine for a new tab, with the machines as they are now.
     fn new_tab_on(&mut self, _: &NewTabOn, window: &mut Window, cx: &mut Context<Self>) {
-        if let Ok(machines) = daemon::machines(&self.dir) {
-            self.machines = machines;
-        }
+        self.load_machines();
         let palette = cx.new(|cx| MachinePalette::new(self.machines.clone(), cx));
         cx.subscribe_in(&palette, window, |this, _, picked: &Picked, window, cx| {
             this.palette = None;
@@ -291,6 +300,9 @@ impl Workspace {
                     // The glyph is drawn small for its size.
                     .text_size(px(24.))
                     .on_click(cx.listener(|this, _, _, cx| {
+                        if !this.menu {
+                            this.load_machines();
+                        }
                         this.menu = !this.menu;
                         cx.notify();
                     }))
