@@ -1,6 +1,8 @@
 //! The window: tabs in the title bar, each a terminal on a machine.
 
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
@@ -53,6 +55,9 @@ pub struct Workspace {
     active: usize,
     /// Whether the menu of machines to open a tab on is open.
     menu: bool,
+    /// Where the button that opens the menu was drawn: a left click on it toggles the menu,
+    /// rather than closing it as presses elsewhere do.
+    menu_button: Rc<Cell<Bounds<Pixels>>>,
     /// The palette to pick a machine for a new tab by name, while it's open.
     palette: Option<Entity<MachinePalette>>,
     /// Why the machines couldn't be listed.
@@ -72,6 +77,7 @@ impl Workspace {
             tabs: Vec::new(),
             active: 0,
             menu: false,
+            menu_button: Rc::default(),
             palette: None,
             error: None,
             focus: cx.focus_handle(),
@@ -334,6 +340,12 @@ impl Workspace {
                         this.menu = !this.menu;
                         cx.notify();
                     }))
+                    .child({
+                        let bounds = self.menu_button.clone();
+                        canvas(move |drawn, _, _| bounds.set(drawn), |_, _, _, _| {})
+                            .absolute()
+                            .size_full()
+                    })
                     .when(self.menu, |button| button.child(self.render_menu(cx))),
             )
             // Room to drag the window by, however many tabs there are; a tab dropped here goes last.
@@ -436,21 +448,26 @@ impl Workspace {
                     .border_color(theme::border())
                     .rounded_lg()
                     .shadow_lg()
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.menu = false;
-                        cx.notify();
+                    .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        // The button toggles the menu on a left click, so it closes it then.
+                        let toggles =
+                            event.button == MouseButton::Left && this.menu_button.get().contains(&event.position);
+                        if !toggles {
+                            this.menu = false;
+                            cx.notify();
+                        }
                     }))
                     .children(items),
             ),
         )
     }
 
-    /// What the window shows without tabs: the machines to open one on, or why there are none.
     /// Closes the window, ending its sessions, and so quits the app.
     fn quit(&mut self, _: &Quit, window: &mut Window, _cx: &mut Context<Self>) {
         window.remove_window();
     }
 
+    /// What the window shows without tabs: the machines to open one on, or why there are none.
     fn render_machines(&self, cx: &mut Context<Self>) -> AnyElement {
         let page = div()
             .track_focus(&self.focus)
