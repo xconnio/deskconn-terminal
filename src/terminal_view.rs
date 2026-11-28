@@ -150,8 +150,10 @@ impl TerminalView {
         let mut term = Terminal::new(Options {
             cols,
             rows,
-            ..Options::default()
+            // The history is limited by lines instead, as they're what the setting is in.
+            max_scrollback: usize::MAX,
         })?;
+        term.set_scrollback_max_lines(Some(Settings::get(cx).scrollback_lines))?;
         let (fg, bg) = theme::terminal_colors();
         let palette = theme::palette(term.default_color_palette()?);
         term.set_default_fg_color(Some(fg))?

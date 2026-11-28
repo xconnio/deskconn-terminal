@@ -64,6 +64,24 @@ initial state, which helps when a program has left it garbled.
 `+` opens a tab on the current tab's machine. To open one on another machine, pick it from `▾`, or
 press Ctrl+Shift+K and type part of its name.
 
+## Settings
+
+Settings are kept in `settings.json`, in `~/.config/deskconn-terminal` on Linux and
+`~/Library/Application Support/deskconn-terminal` on macOS:
+
+```json
+{
+  "font_size": 14.0,
+  "scrollback_lines": 10000
+}
+```
+
+- `font_size`: the font size in pixels, from 8 to 40. The zoom keys change it.
+- `scrollback_lines`: how many lines of history each tab keeps beyond its screen, 10,000 by
+  default. It's approximate: history is dropped in blocks of several hundred lines, so up to a
+  block fewer may stay. A long line that wraps counts once per row it takes. A change applies to
+  tabs opened afterward.
+
 ## Notes
 
 GPUI comes from Zed's repository at a release tag. Its dependency `zed-async-tar` needs `xattr`

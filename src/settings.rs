@@ -12,11 +12,17 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     /// The terminals' font size, in pixels.
     pub font_size: f32,
+    /// How many lines of history each terminal keeps beyond its screen, roughly.
+    pub scrollback_lines: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { font_size: 14. }
+        Self {
+            font_size: 14.,
+            // GNOME Terminal's.
+            scrollback_lines: 10_000,
+        }
     }
 }
 
