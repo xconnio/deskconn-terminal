@@ -17,7 +17,7 @@ make release  # optimized build in target/release/
 ## Requirements
 
 - A signed-in `desk` CLI with its daemon running (`desk auth login`, then `desk serve`).
-- On Linux, the development packages GPUI builds against, on Debian and Ubuntu:
+- On Linux, the development packages GPUI needs. On Debian and Ubuntu:
 
   ```sh
   sudo apt install build-essential clang cmake pkg-config libxkbcommon-dev \
@@ -25,9 +25,9 @@ make release  # optimized build in target/release/
     libfontconfig-dev libfreetype-dev libzstd-dev
   ```
 
-- On Linux, [Zig](https://ziglang.org/download/) 0.17, which builds libghostty-vt from source
-  (set `ZIG` if it isn't on the `PATH`). macOS uses Ghostty's prebuilt library. Either way it's
-  linked statically, so the app needs nothing extra to run.
+- On Linux, [Zig](https://ziglang.org/download/) 0.17 to build libghostty-vt from source (set
+  `ZIG` if it isn't on your `PATH`). macOS uses Ghostty's prebuilt library. Either way, it's
+  linked statically, so the app needs nothing else to run.
 
 ## Keys
 
@@ -49,28 +49,28 @@ make release  # optimized build in target/release/
 | Ctrl+-                       | Cmd+-         | Smaller font       |
 | Ctrl+0                       | Cmd+0         | Default font size  |
 
-Selecting text with the mouse offers it to a middle click on Linux, and Ctrl+click (Cmd+click on
-macOS) opens a link. A right click opens a menu to copy, paste, select all, clear, or reset.
+On Linux, selected text can be pasted with a middle click. Ctrl+click (Cmd+click on macOS) opens
+a link, and a right click opens a menu to copy, paste, select all, clear, or reset.
 
-Programs that take the mouse, such as Claude Code, Codex, vim, or htop, get its wheel, clicks, and
-drags; holding Shift keeps them for the terminal, to select text or open the menu.
+Programs that use the mouse, such as Claude Code, Codex, vim, and htop, receive its clicks, drags,
+and wheel. Hold Shift to select text or open the menu instead.
 
-Clear forgets the scrollback and brings the prompt to the top; Reset puts the terminal back as it
-started, for when a program has left it in a bad state.
+Clear removes the scrollback and moves the prompt to the top. Reset restores the terminal to its
+initial state, which helps when a program has left it garbled.
 
-`+` opens a tab on the machine of the current one; `▾` picks another machine, as does
-Ctrl+Shift+K, by typing part of its name.
+`+` opens a tab on the current tab's machine. To open one on another machine, pick it from `▾`, or
+press Ctrl+Shift+K and type part of its name.
 
 ## Notes
 
-GPUI comes from Zed's repository, at a release tag. Its `zed-async-tar` needs `xattr` 0.2,
-which no longer builds with current `libc`; `vendor/xattr` is that crate with the one-line fix,
-used through `[patch.crates-io]` until GPUI moves on.
+GPUI comes from Zed's repository at a release tag. Its dependency `zed-async-tar` needs `xattr`
+0.2, which no longer builds with current `libc`. `vendor/xattr` is that crate with a one-line fix,
+applied through `[patch.crates-io]` until GPUI moves on.
 
-The terminal's font, [JetBrains Mono](https://www.jetbrains.com/lp/mono/), is built into the
-app from `assets/fonts`, under the SIL Open Font License (`assets/fonts/OFL.txt`).
+The terminal font, [JetBrains Mono](https://www.jetbrains.com/lp/mono/), is bundled from
+`assets/fonts` under the SIL Open Font License (`assets/fonts/OFL.txt`).
 
-On Linux, the app adds itself to the desktop as it starts: an entry in
-`~/.local/share/applications` and its icon in `~/.local/share/icons`, named after its app ID,
-`io.xconn.deskconn.terminal`. That's how the desktop shows the window's icon, and the entry starts
-the executable wherever it was last run from.
+On Linux, the app registers itself with the desktop on startup. It writes an entry to
+`~/.local/share/applications` and its icon to `~/.local/share/icons`, both named after its app ID,
+`io.xconn.deskconn.terminal`. The desktop needs these to show the window's icon, and the entry
+launches the executable from wherever it was last run.
