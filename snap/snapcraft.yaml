@@ -1,5 +1,5 @@
 name: deskconn-terminal
-base: core24
+base: core26
 adopt-info: deskconn-terminal
 summary: A terminal for your DeskConn machines
 description: |
