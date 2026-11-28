@@ -473,13 +473,17 @@ impl TerminalView {
             .term
             .active_screen()
             .is_ok_and(|screen| screen == Screen::Alternate);
-        if alternate && self.term.mode(Mode::ALT_SCROLL).unwrap_or(false) {
-            // Full-screen programs scroll with the arrow keys.
-            let prefix: &[u8] = if self.term.mode(Mode::DECCKM).unwrap_or(false) {
-                b"\x1bO"
-            } else {
-                b"\x1b["
-            };
+        let cursor_keys = self.term.mode(Mode::DECCKM).unwrap_or(false);
+        // Full-screen programs scroll with the arrow keys. So do programs such as less, as git runs
+        // it, on the normal screen, once the view has nowhere further to scroll: they ask for the
+        // application cursor keys, as a shell at its prompt mostly doesn't.
+        let arrows = if alternate {
+            self.term.mode(Mode::ALT_SCROLL).unwrap_or(false)
+        } else {
+            cursor_keys && !self.can_scroll(lines)
+        };
+        if arrows {
+            let prefix: &[u8] = if cursor_keys { b"\x1bO" } else { b"\x1b[" };
             let key = if lines > 0 { b'A' } else { b'B' };
             let data = (0..lines.unsigned_abs())
                 .flat_map(|_| prefix.iter().copied().chain([key]))
@@ -488,6 +492,18 @@ impl TerminalView {
         } else {
             self.term.scroll_viewport(ScrollViewport::Delta(-lines as isize));
             cx.notify();
+        }
+    }
+
+    /// Whether the view can scroll back, for lines above 0, or forward, for lines below.
+    fn can_scroll(&self, lines: i32) -> bool {
+        let Ok(bar) = self.term.scrollbar() else {
+            return false;
+        };
+        if lines > 0 {
+            bar.offset > 0
+        } else {
+            bar.offset + bar.len < bar.total
         }
     }
 
