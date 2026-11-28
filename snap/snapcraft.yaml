@@ -1,0 +1,78 @@
+name: deskconn-terminal
+base: core24
+adopt-info: deskconn-terminal
+summary: A terminal for your DeskConn machines
+description: |
+  DeskConn Terminal opens terminals on your DeskConn machines through the
+  local deskconn daemon (desk serve), with tabs in the title bar. Each tab
+  is a persistent session on its machine: a lost connection is restored
+  without losing the shell.
+
+  It needs the desk CLI, signed in, with its daemon running. Let the snap
+  reach the CLI's configuration and daemon with:
+
+    sudo snap connect deskconn-terminal:deskconn
+license: MIT
+icon: assets/icon.png
+grade: stable
+confinement: strict
+compression: lzo
+
+plugs:
+  # The desk CLI's configuration and its daemon's socket, in ~/.deskconn.
+  deskconn:
+    interface: personal-files
+    write:
+      - $HOME/.deskconn
+
+apps:
+  deskconn-terminal:
+    command: bin/deskconn-terminal
+    desktop: snap/gui/deskconn-terminal.desktop
+    extensions:
+      - gnome
+    plugs:
+      - deskconn
+      - network
+
+parts:
+  deskconn-terminal:
+    plugin: rust
+    source: .
+    build-packages:
+      - clang
+      - cmake
+      - curl
+      - git
+      - pkg-config
+      - xz-utils
+      - libfontconfig-dev
+      - libfreetype-dev
+      - libvulkan-dev
+      - libwayland-dev
+      - libx11-xcb-dev
+      - libxcb1-dev
+      - libxkbcommon-dev
+      - libxkbcommon-x11-dev
+      - libzstd-dev
+    stage-packages:
+      - libvulkan1
+      - libxkbcommon-x11-0
+    override-build: |
+      set -eu
+      version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
+      revision=$(git -C "$CRAFT_PROJECT_DIR" -c safe.directory="$CRAFT_PROJECT_DIR" rev-parse HEAD)
+      if [ -z "$(git -C "$CRAFT_PROJECT_DIR" -c safe.directory="$CRAFT_PROJECT_DIR" \
+        tag --points-at "$revision" --list "v$version")" ]; then
+        version="$version+$(printf '%.7s' "$revision")"
+      fi
+      craftctl set version="$version"
+
+      # libghostty-vt is built from source on Linux, with Zig.
+      zig="$CRAFT_PART_BUILD/zig"
+      mkdir -p "$zig"
+      curl -fsSL "https://ziglang.org/download/0.17.1/zig-$(uname -m)-linux-0.17.1.tar.xz" |
+        tar -xJ --strip-components=1 -C "$zig"
+      export ZIG="$zig/zig"
+
+      craftctl default

@@ -10,8 +10,13 @@ use crate::APP_ID;
 
 const ICON: &[u8] = include_bytes!("../assets/icon.png");
 
-/// Writes the desktop entry, to start this very executable, and the icon, unless they're there.
+/// Writes the desktop entry, to start this very executable, and the icon, unless they're there or
+/// the app is a snap.
 pub fn register() -> Result<()> {
+    // A snap comes with its own.
+    if std::env::var_os("SNAP").is_some() {
+        return Ok(());
+    }
     let data = dirs::data_dir().context("no data directory")?;
     let exe = std::env::current_exe().context("find the executable")?;
     let entry = format!(

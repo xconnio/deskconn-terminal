@@ -15,7 +15,11 @@ check:
 release:
 	cargo build --release
 
+# A snap, with snapcraft.
+snap:
+	snapcraft pack
+
 clean:
 	cargo clean
 
-.PHONY: run test test-daemon check release clean
+.PHONY: run test test-daemon check release snap clean
