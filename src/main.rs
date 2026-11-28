@@ -22,7 +22,7 @@ use gpui::{
     size,
 };
 
-use crate::terminal_view::{Clear, Copy, DecreaseFontSize, IncreaseFontSize, Paste, Reset, ResetFontSize};
+use crate::terminal_view::{Clear, Copy, DecreaseFontSize, IncreaseFontSize, Paste, Reset, ResetFontSize, SelectAll};
 use crate::workspace::{ActivateTab, CloseTab, NewTab, NewTabOn, NextTab, PreviousTab, Quit, Workspace};
 
 /// The window's app ID, by which a desktop knows the app, and finds its icon.
@@ -90,6 +90,7 @@ fn bind_keys(cx: &mut App) {
             KeyBinding::new("cmd-k", Clear, Some("Terminal")),
             KeyBinding::new("cmd-alt-k", Reset, Some("Terminal")),
             KeyBinding::new("cmd-v", Paste, Some("Terminal")),
+            KeyBinding::new("cmd-a", SelectAll, Some("Terminal")),
             KeyBinding::new("cmd-=", IncreaseFontSize, Some("Terminal")),
             KeyBinding::new("cmd-+", IncreaseFontSize, Some("Terminal")),
             KeyBinding::new("cmd--", DecreaseFontSize, Some("Terminal")),
@@ -111,6 +112,7 @@ fn bind_keys(cx: &mut App) {
             KeyBinding::new("shift-insert", Paste, Some("Terminal")),
             KeyBinding::new("ctrl-shift-c", Copy, Some("Terminal")),
             KeyBinding::new("ctrl-shift-v", Paste, Some("Terminal")),
+            KeyBinding::new("ctrl-shift-a", SelectAll, Some("Terminal")),
             KeyBinding::new("ctrl-shift-l", Clear, Some("Terminal")),
             KeyBinding::new("ctrl-shift-alt-l", Reset, Some("Terminal")),
             KeyBinding::new("ctrl-=", IncreaseFontSize, Some("Terminal")),
